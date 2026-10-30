@@ -1,0 +1,1 @@
+reachy-mini[mujoco]==1.8.0
