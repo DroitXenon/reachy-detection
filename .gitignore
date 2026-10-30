@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded MediaPipe model (downloaded automatically on first run)
+models/*.task
