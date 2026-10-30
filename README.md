@@ -24,12 +24,15 @@ The first run downloads Google's Hand Landmarker model into `models/` (internet
 required once). Frames are processed locally and are not recorded. This demo runs
 independently of Reachy and does not require the simulator.
 
-Show one hand, straighten your index finger, and curl your middle, ring, and little
-fingers. Keep your hand in view and point across the image. The preview draws all
-21 landmarks and shows a green arrow after three consecutive pointing frames.
-An open palm, fist, or two visible hands should not produce an arrow.
+Extend your index finger and let the other fingers bend naturally; a tight fist
+is not required. Keep your hand in view and point across the image. The preview
+draws all 21 landmarks and shows a green arrow after two consecutive pointing
+frames from the same hand. A resting second hand is allowed; two pointing hands,
+an open palm, or a fist are rejected.
 
 - Press **Q** or **Esc** to quit, or **M** to toggle the mirrored preview.
+- Press **D** for index-joint angles and straightness details. The status explains
+  whether to straighten the index, relax another finger, or improve visibility.
 - Use `python hand_tracking.py --camera 1` if the default camera is incorrect.
 - On macOS, allow your terminal camera access in System Settings > Privacy &
   Security > Camera. Restart the terminal after changing permissions if needed.
@@ -50,9 +53,26 @@ the hand landmarks and green pointing arrow. Place two separated objects, such a
 a cup and a bottle, in good lighting. Check that both get labelled before trying
 to point. Boxes identify detected objects; they do not yet indicate a selected
 target. The model supports the 80 COCO categories, not arbitrary object names.
+The `person` category is excluded inside the detector, so people do not get boxes
+or count toward the displayed object total. Hand detection still runs normally.
 
-The default minimum confidence is 0.4. If objects are missed, improve lighting,
-move them closer, or try `--score-threshold 0.3` (which can increase false positives).
+The default minimum confidence is 0.25. Press **-** to lower the threshold by 5
+percentage points or **+** to raise it while running. The threshold is shown above
+the preview. Lower thresholds can recover weak detections but increase false
+positives. Press **D** to see up to three below-threshold candidates, explicitly
+labelled as unconfirmed. These are model guesses, not verified object identities.
+If detection is disabled, the preview says **Objects OFF** and reminds you to use
+`--objects`. If objects are missed, improve lighting and move them closer. To check
+whether your object type is supported by the installed model:
+
+```bash
+python hand_tracking.py --list-object-labels
+```
+
+The model includes cup, bottle, book, cell phone, keyboard, and many other common
+objects, but not every item (for example, pen is not a category). Threshold changes
+cannot add new categories.
+
 At most 10 detections are shown. Both models process the same clean, mirrored frame
 before overlays are drawn, so boxes and pointing direction share pixel coordinates.
 Frames wider than 960 pixels are resized proportionally, including high-resolution
@@ -64,22 +84,33 @@ Model: [version 1, int8](https://storage.googleapis.com/mediapipe-models/object_
 
 ### How the pointing rule works
 
-MediaPipe Hand Landmarker supplies image and 3D world landmarks. The index finger's
-two middle joints must each have an angle of at least 155 degrees; the middle,
-ring, and little fingers' first interphalangeal joints must each be at most 140
-degrees. The thumb is ignored. Angles use world landmarks so the rule is independent
-of hand rotation in the image. These are initial heuristic thresholds, not a
-trained gesture classifier.
+MediaPipe Hand Landmarker supplies image and 3D world landmarks. Hand detection,
+presence, and tracking confidence thresholds are 0.5. Gesture rules use world
+coordinates so they are independent of image rotation and scale:
+
+- Index PIP/DIP joint angles must be at least 140/135 degrees. Its base-to-tip
+  distance must be at least 86% of the sum of its three bone lengths.
+- A finger is clearly extended when both angles are at least 155 degrees and its
+  base-to-tip distance is at least 92% of bone length. Reject an extended middle
+  finger (V sign), or both an extended ring and little finger.
+- Also reject a middle finger whose reach ratio is within 0.03 of the index's or
+  greater, AND whose smaller joint angle is within 15 degrees of the index's or
+  greater. This prevents a similarly curved open hand from looking like pointing.
+- Other fingers can be loosely bent. The thumb is ignored. Invalid landmarks
+  are rejected. These remain heuristic thresholds, not a trained gesture classifier.
 
 The arrow uses the screen-space vector from index knuckle (landmark 5) to fingertip
 (8), and starts at the fingertip. Both tracking and drawing use the same mirrored
 frame. A projection shorter than 15 pixels or 30% of wrist-to-middle-knuckle length
 is rejected. This catches some foreshortened poses but cannot reliably interpret
-pointing in depth. Three consecutive positive frames reduce flicker; any negative
-frame clears the arrow immediately. Occlusion and unusual poses can still fail.
+pointing in depth. Two consecutive positive frames from the same handedness and a
+nearby wrist confirm the gesture; any rejected frame clears the arrow immediately.
+Two pointing hands are ambiguous, but one pointing hand alongside a resting hand
+is accepted. Occlusion and unusual poses can still fail.
 
 Manual check: point left/right/up/down with either hand, then show a fist and an
-open palm, remove your hand, and try two hands. Check the arrow's direction and
+open palm, remove your hand, and try a resting second hand versus two pointing
+hands. Check the arrow's direction and
 that it disappears when pointing is unclear. Live gesture accuracy needs this
 check on your webcam and with other users.
 
@@ -89,16 +120,20 @@ and the [official model, version 1](https://storage.googleapis.com/mediapipe-mod
 ### Checks
 
 ```bash
-python -m unittest -v test_hand_tracking
+python -m unittest -v test_hand_tracking test_object_detection
 ```
 
-Five geometry tests cover rotations, reflections, non-pointing poses, degenerate
-landmarks, and short projected directions. These tests and blank-frame model
+Twelve geometry tests cover rotations, reflections, relaxed pointing, non-pointing
+poses, invalid landmarks, second-hand selection, and short projections. These tests and blank-frame model
 inference passed on the development Mac. Live webcam validation was blocked by
 macOS camera permission; the preview and real-hand accuracy still need checking.
 Object detection also passed a blank-frame check and detected both a cat and dog
 in Google's example image. The combined preview was exercised with both real
 models and a substituted camera frame; live iPhone detection remains unverified.
+Person exclusion was verified with the native detector on Google's pose example:
+the baseline detected a person, while the filtered detector omitted it and kept
+other objects. The revised gesture thresholds need a live recheck with your hand;
+synthetic tests do not establish real-world accuracy.
 
 ## Head movement
 

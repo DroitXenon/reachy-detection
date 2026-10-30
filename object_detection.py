@@ -1,6 +1,7 @@
 """EfficientDet-Lite0 detection and labelled boxes for the camera preview."""
 
 from pathlib import Path
+from zipfile import ZipFile
 
 import cv2
 from mediapipe.tasks import python
@@ -14,15 +15,40 @@ OBJECT_MODEL_URL = (
 )
 
 
-def create_detector(model_path, score_threshold=0.4):
+def supported_labels(model_path):
+    """Read the actual label map bundled with this detector model."""
+    with ZipFile(model_path) as model:
+        labels = model.read("labels.txt").decode("utf-8").splitlines()
+    return sorted({label.strip() for label in labels} - {"", "???", "person"})
+
+
+def create_detector(model_path, score_threshold=0.25):
     """Create a video detector; the caller must close it (or use a with block)."""
     options = vision.ObjectDetectorOptions(
         base_options=python.BaseOptions(model_asset_path=str(model_path)),
         running_mode=vision.RunningMode.VIDEO,
         score_threshold=score_threshold,
-        max_results=10,
+        max_results=-1,
+        category_denylist=["person"],
     )
     return vision.ObjectDetector.create_from_options(options)
+
+
+def ranked_objects(detections):
+    """Return non-person candidates in descending confidence order."""
+    candidates = []
+    for detection in detections:
+        if not detection.categories:
+            continue
+        category = max(detection.categories, key=lambda item: item.score)
+        if category.category_name not in (None, "", "???", "person"):
+            candidates.append(detection)
+    return sorted(candidates, key=lambda item: max(c.score for c in item.categories), reverse=True)
+
+
+def visible_objects(detections, threshold):
+    return [d for d in ranked_objects(detections)
+            if max(c.score for c in d.categories) >= threshold][:10]
 
 
 def draw_objects(frame, detections):

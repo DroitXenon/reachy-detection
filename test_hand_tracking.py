@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from hand_tracking import is_pointing, pointing_direction
+from hand_tracking import choose_pointing_hand, is_pointing, pointing_direction
 
 
 def hand_pose(extended):
@@ -32,6 +32,50 @@ class PointingGeometryTests(unittest.TestCase):
 
     def test_degenerate_coordinates_are_rejected(self):
         self.assertFalse(is_pointing(np.zeros((21, 3))))
+
+    def test_slightly_bent_index_is_accepted(self):
+        pose = hand_pose({5})
+        vector = np.array([np.sin(np.deg2rad(35)), np.cos(np.deg2rad(35)), 0])
+        pose[7] = pose[6] + vector
+        pose[8] = pose[7] + vector
+        self.assertTrue(is_pointing(pose))
+
+    def test_other_fingers_can_be_relaxed_instead_of_tightly_curled(self):
+        pose = hand_pose({5, 9, 13, 17})
+        vector = np.array([0, np.cos(np.deg2rad(35)), np.sin(np.deg2rad(35))])
+        for base in (9, 13, 17):
+            pose[base + 2] = pose[base + 1] + vector
+            pose[base + 3] = pose[base + 2] + vector
+        self.assertTrue(is_pointing(pose))
+
+    def test_similarly_curved_open_hand_is_rejected(self):
+        pose = hand_pose({5, 9, 13, 17})
+        vector = np.array([0, np.cos(np.deg2rad(30)), np.sin(np.deg2rad(30))])
+        for base in (5, 9, 13, 17):
+            pose[base + 2] = pose[base + 1] + vector
+            pose[base + 3] = pose[base + 2] + vector
+        self.assertFalse(is_pointing(pose))
+
+    def test_nonfinite_landmarks_are_rejected(self):
+        pose = hand_pose({5})
+        pose[8, 0] = np.nan
+        self.assertFalse(is_pointing(pose))
+
+    def test_resting_second_hand_is_allowed_in_either_detection_order(self):
+        pointing, resting = hand_pose({5}), hand_pose(set())
+        for hands, expected in (([pointing, resting], 0), ([resting, pointing], 1)):
+            pixels = [hand[:, :2] * 50 + 200 for hand in hands]
+            index, direction, _, _ = choose_pointing_hand(hands, pixels)
+            self.assertEqual(index, expected)
+            self.assertIsNotNone(direction)
+
+    def test_two_pointing_hands_are_ambiguous(self):
+        hands = [hand_pose({5}), hand_pose({5})]
+        pixels = [hand[:, :2] * 50 + 200 for hand in hands]
+        self.assertIsNone(choose_pointing_hand(hands, pixels)[0])
+
+    def test_no_hands_has_no_selection(self):
+        self.assertIsNone(choose_pointing_hand([], [])[0])
 
     def test_arrow_follows_index_and_reflects_with_preview(self):
         pixels = hand_pose({5})[:, :2] * 50 + 200
