@@ -230,7 +230,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                 put_panel_text(panel, status, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 controls = "C: teach pointing | R: reset | Q: quit | M: mirror | D: details"
                 if object_model is not None:
-                    object_status = f"Objects: {len(detections)} | Minimum score: {score_threshold:.0%} | - / +: adjust"
+                    object_status = f"{Path(object_model).stem} | Objects: {len(detections)} | Minimum score: {score_threshold:.0%} | - / +: adjust"
                 else:
                     object_status = "Objects OFF: restart with --objects to detect items"
                 put_panel_text(panel, object_status, (12, 53),

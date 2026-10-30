@@ -2,6 +2,8 @@
 
 from contextlib import contextmanager
 from threading import Event
+from pathlib import Path
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
@@ -112,7 +114,10 @@ class WorkerTests(unittest.TestCase):
              patch('hand_tracking.cv2.putText', side_effect=draw), \
              patch('hand_tracking.cv2.getWindowProperty', return_value=1), \
              patch('hand_tracking.cv2.waitKey', side_effect=[-1, -1, -1, ord('q')]):
-            run(0, MODEL_PATH, False)
+            # A real user's saved calibration must not influence synthetic tests.
+            with tempfile.TemporaryDirectory() as temporary:
+                run(0, MODEL_PATH, False,
+                    calibration_path=Path(temporary) / 'test-pointing.json')
         self.assertEqual(statuses, ['Hold pointing gesture...', 'Hold pointing gesture...',
                                     'POINTING', 'Waiting for fresh detection...'])
 

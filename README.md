@@ -15,7 +15,7 @@ python prepare_yolo.py
 
 If the environment already exists, activate it and install the requirements.
 The YOLO model is already prepared on this development Mac. On a fresh checkout,
-`prepare_yolo.py` downloads official YOLO11s weights and exports a 640px ONNX model
+`prepare_yolo.py` downloads official YOLO26s weights and exports a 640px ONNX model
 plus its label metadata into `models/`. It installs export tools in a temporary
 environment, leaving this Conda environment's OpenCV installation intact. Runtime
 inference uses OpenCV; PyTorch is not a runtime dependency. Internet is required
@@ -56,7 +56,7 @@ python hand_tracking.py --camera 1 --objects
 Use the same camera index that worked for your webcam/iPhone; `1` is an example,
 not a fixed iPhone device ID. The first run downloads EfficientDet-Lite0 (int8,
 version 1) only when explicitly using the legacy `.tflite` model. The default is
-now YOLO11s at 640px input, prepared with `python prepare_yolo.py` during setup.
+now YOLO26s at 640px input, prepared with `python prepare_yolo.py` during setup.
 No additional runtime Python packages are required.
 
 The preview adds blue boxes, category names, and confidence scores, while keeping
@@ -105,7 +105,8 @@ The preview shows its FPS, inference time, and overlay age. These are separate:
 a smooth 30 FPS preview does not imply 30 object detections per second. The camera
 requests 960x540 at 30 FPS, though the device/Continuity Camera may choose a different
 format. On the development M1 Pro, a paced synthetic 30 FPS camera kept the preview
-near 30 FPS with about 93ms inference time using the current calibration method.
+near 30 FPS with about 94ms inference time using YOLO26s and the current calibration
+method. Object inference alone measured about 80ms on a public reference image.
 GUI calls were substituted in that test; it does not measure the live iPhone
 connection. The earlier sequential pipeline took about 113ms per blank frame
 before capture/display, limiting it to roughly 9 FPS. Public example images
@@ -116,14 +117,21 @@ For less inference work, prepare the nano model and select it explicitly:
 
 ```bash
 python prepare_yolo.py --size n
-python hand_tracking.py --camera 1 --objects --object-model models/yolo11n.onnx
+python hand_tracking.py --camera 1 --objects --object-model models/yolo26n.onnx
 ```
 
-Model source and published model comparisons: [Ultralytics YOLO11](https://docs.ultralytics.com/models/yolo11/).
-The ONNX export uses opset 12, float32, fixed 640x640 input, letterboxing, and
-class-agnostic nonmaximum suppression at IoU 0.5. The smaller nano variant trades
-published detection accuracy for speed. Person detections are discarded before
-display and suppression. Neither model recognises categories outside COCO.
+Model source and published model comparisons: [Ultralytics YOLO26](https://docs.ultralytics.com/models/yolo26/).
+The default export is YOLO26s with `nms=False`, opset 12, float32, and fixed
+640x640 input. Its NMS-free output has shape `[1, 300, 6]`: x1, y1, x2, y2,
+confidence, class ID. The decoder removes letterbox padding and rescales boxes
+back to the camera image; it does not apply a second NMS pass. The accompanying
+JSON records the output format so old YOLO11 exports use their separate raw-score
+decoder. Person detections are excluded before display. The smaller nano variant
+trades published detection accuracy for speed. Both pretrained families use COCO
+categories. The preview displays the active model filename.
+
+For a YOLO11 comparison, run `python prepare_yolo.py --family 11 --size s`, then
+select `--object-model models/yolo11s.onnx`. The default remains YOLO26s.
 
 The previous detector remains available for comparisons:
 
@@ -181,11 +189,11 @@ Source: [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutio
 ### Checks
 
 ```bash
-python -m unittest -v test_hand_tracking test_object_detection test_vision_worker
+python -m unittest -v test_hand_tracking test_object_detection test_yolo26 test_vision_worker
 ```
 
 Tests cover pose features, calibration persistence, duplicate-frame rejection, confidence
-filtering, person exclusion, ONNX coordinate conversion/NMS, frame dropping,
+filtering, person exclusion, both ONNX output formats, coordinate conversion, frame dropping,
 orientation changes, stale results, and worker errors. Native models are also
 checked on public reference images. Live iPhone accuracy and frame rate need a
 user check; synthetic frames and a few example images are not an accuracy benchmark.

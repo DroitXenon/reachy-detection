@@ -1,4 +1,4 @@
-"""YOLO11 ONNX detection, with the earlier MediaPipe detector as a fallback."""
+"""YOLO26 ONNX detection, with YOLO11/MediaPipe support for comparisons."""
 
 import json
 from pathlib import Path
@@ -11,7 +11,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 
-OBJECT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "yolo11s.onnx"
+OBJECT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "yolo26s.onnx"
 OBJECT_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/object_detector/"
     "efficientdet_lite0/int8/1/efficientdet_lite0.tflite"
@@ -78,6 +78,42 @@ def decode_yolo(output, names, width, height, scale_x, scale_y, pad_x, pad_y, th
     return detections
 
 
+def decode_yolo_end_to_end(output, names, width, height, scale_x, scale_y, pad_x, pad_y, threshold):
+    """Decode YOLO26 NMS-free rows: x1, y1, x2, y2, score, class_id.
+
+    This format already contains final predictions; applying the YOLO11
+    transpose/argmax decoder or another NMS pass would change their meaning.
+    """
+    output = np.asarray(output)
+    if output.ndim != 3 or output.shape[0] != 1 or output.shape[2] != 6:
+        raise ValueError(f'Expected YOLO26 output [1, N, 6], received {output.shape}')
+    rows = output[0]
+    rows = rows[np.isfinite(rows).all(axis=1) & (rows[:, 4] >= threshold)]
+    rows = rows[np.argsort(-rows[:, 4])]
+    detections = []
+    for x1, y1, x2, y2, score, class_value in rows:
+        class_id = int(class_value)
+        if class_id != class_value or class_id not in names or names[class_id] == 'person':
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        left = int(np.clip((x1 - pad_x) / scale_x, 0, width - 1))
+        top = int(np.clip((y1 - pad_y) / scale_y, 0, height - 1))
+        right = int(np.clip((x2 - pad_x) / scale_x, 0, width - 1))
+        bottom = int(np.clip((y2 - pad_y) / scale_y, 0, height - 1))
+        if right - left < 2 or bottom - top < 2:
+            continue
+        detections.append(SimpleNamespace(
+            bounding_box=SimpleNamespace(origin_x=left, origin_y=top,
+                                         width=right - left, height=bottom - top),
+            categories=[SimpleNamespace(category_name=names[class_id], display_name=None,
+                                        score=float(score))],
+        ))
+        if len(detections) >= 30:
+            break
+    return detections
+
+
 class YoloDetector:
     """OpenCV runs the exported model; no PyTorch needed in the app environment."""
 
@@ -85,6 +121,9 @@ class YoloDetector:
         metadata = json.loads(Path(path).with_suffix(".json").read_text())
         self.names = {int(key): value for key, value in metadata["names"].items()}
         self.size = metadata["input_size"]
+        self.output_format = metadata.get('output_format', 'xywh_class_scores')
+        if self.output_format not in ('xywh_class_scores', 'xyxy_score_class'):
+            raise ValueError(f'Unsupported YOLO output format: {self.output_format}')
         self.threshold = threshold
         self.net = cv2.dnn.readNetFromONNX(str(path))
         self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
@@ -105,8 +144,9 @@ class YoloDetector:
         canvas[pad_y:pad_y + resized_h, pad_x:pad_x + resized_w] = cv2.resize(rgb, (resized_w, resized_h))
         self.net.setInput(cv2.dnn.blobFromImage(canvas, 1 / 255.0, swapRB=False))
         output = self.net.forward()
-        detections = decode_yolo(output, self.names, width, height, resized_w / width,
-                                 resized_h / height, pad_x, pad_y, self.threshold)
+        decoder = decode_yolo_end_to_end if self.output_format == 'xyxy_score_class' else decode_yolo
+        detections = decoder(output, self.names, width, height, resized_w / width,
+                             resized_h / height, pad_x, pad_y, self.threshold)
         return SimpleNamespace(detections=detections)
 
 
