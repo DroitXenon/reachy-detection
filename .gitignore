@@ -221,3 +221,4 @@ __marimo__/
 
 # Downloaded MediaPipe model (downloaded automatically on first run)
 models/*.task
+models/*.tflite

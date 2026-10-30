@@ -1,6 +1,7 @@
 """Webcam landmarks and a conservative, rule-based pointing gesture demo."""
 
 import argparse
+from contextlib import ExitStack
 import math
 from pathlib import Path
 import shutil
@@ -13,6 +14,10 @@ import mediapipe as mp
 import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+
+from object_detection import (
+    OBJECT_MODEL_PATH, OBJECT_MODEL_URL, create_detector, draw_objects,
+)
 
 
 MODEL_PATH = Path(__file__).resolve().parent / "models" / "hand_landmarker.task"
@@ -30,15 +35,15 @@ CONNECTIONS = (
 )
 
 
-def ensure_model(path):
+def ensure_model(path, url=MODEL_URL):
     """Download the official model once; never leave a partial model file."""
     if path.is_file():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading Hand Landmarker model to {path}...", flush=True)
+    print(f"Downloading model to {path}...", flush=True)
     temporary = None
     try:
-        with urlopen(MODEL_URL, timeout=60) as response:
+        with urlopen(url, timeout=60) as response:
             with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
                 temporary = Path(output.name)
                 shutil.copyfileobj(response, output)
@@ -89,7 +94,7 @@ def draw_hand(frame, pixels):
         cv2.circle(frame, tuple(point), 4, (0, 230, 255), -1)
 
 
-def run(camera_index, model_path, mirror):
+def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.4):
     options = vision.HandLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(model_path)),
         running_mode=vision.RunningMode.VIDEO,
@@ -111,19 +116,33 @@ def run(camera_index, model_path, mirror):
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
         consecutive = 0
         timestamp = -1
-        with vision.HandLandmarker.create_from_options(options) as landmarker:
+        with ExitStack() as stack:
+            landmarker = stack.enter_context(vision.HandLandmarker.create_from_options(options))
+            detector = (
+                stack.enter_context(create_detector(object_model, score_threshold))
+                if object_model is not None else None
+            )
             while True:
                 success, frame = camera.read()
                 if not success:
                     raise RuntimeError("Webcam stopped returning frames.")
+                # Some iPhone cameras ignore capture-size requests. Bound processing size.
+                if frame.shape[1] > 960:
+                    new_height = max(1, round(frame.shape[0] * 960 / frame.shape[1]))
+                    frame = cv2.resize(frame, (960, new_height), interpolation=cv2.INTER_AREA)
                 if mirror:
                     frame = cv2.flip(frame, 1)
                 height, width = frame.shape[:2]
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 timestamp = max(timestamp + 1, time.monotonic_ns() // 1_000_000)
-                result = landmarker.detect_for_video(
-                    mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), timestamp
+                image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                result = landmarker.detect_for_video(image, timestamp)
+                # Both models see the same unannotated frame with the same timestamp.
+                detections = (
+                    detector.detect_for_video(image, timestamp).detections
+                    if detector is not None else []
                 )
+                draw_objects(frame, detections)
                 hands = result.hand_landmarks
                 candidate = False
                 direction = None
@@ -155,12 +174,16 @@ def run(camera_index, model_path, mirror):
                     visible, start, end = cv2.clipLine((0, 0, width, height), origin, endpoint)
                     if visible:
                         cv2.arrowedLine(frame, start, end, (0, 255, 80), 3, tipLength=0.06)
-                cv2.rectangle(frame, (0, 0), (width, 68), (25, 25, 25), -1)
+                # Put controls above the image so they never hide object labels.
+                panel = np.full((68, width, 3), 25, dtype=np.uint8)
                 color = (0, 255, 80) if stable else (220, 220, 220)
-                cv2.putText(frame, status, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(frame, "Q / Esc: quit | M: mirror", (12, 53),
+                cv2.putText(panel, status, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                controls = "Q / Esc: quit | M: mirror"
+                if detector is not None:
+                    controls += f" | Objects: {len(detections)}"
+                cv2.putText(panel, controls, (12, 53),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1)
-                cv2.imshow(WINDOW, frame)
+                cv2.imshow(WINDOW, np.vstack((panel, frame)))
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                     break
@@ -178,11 +201,20 @@ def main():
     parser.add_argument("--model", type=Path, default=MODEL_PATH)
     parser.add_argument("--no-mirror", action="store_true")
     parser.add_argument("--download-model-only", action="store_true")
+    parser.add_argument("--objects", action="store_true", help="Also detect and label common objects")
+    parser.add_argument("--object-model", type=Path, default=OBJECT_MODEL_PATH)
+    parser.add_argument("--score-threshold", type=float, default=0.4,
+                        help="Minimum object detection score, from 0 to 1 (default: 0.4)")
     args = parser.parse_args()
+    if not 0 <= args.score_threshold <= 1:
+        parser.error("--score-threshold must be between 0 and 1")
     try:
         ensure_model(args.model)
+        if args.objects:
+            ensure_model(args.object_model, OBJECT_MODEL_URL)
         if not args.download_model_only:
-            run(args.camera, args.model, not args.no_mirror)
+            run(args.camera, args.model, not args.no_mirror,
+                args.object_model if args.objects else None, args.score_threshold)
     except KeyboardInterrupt:
         pass
     except (OSError, RuntimeError, ValueError) as error:

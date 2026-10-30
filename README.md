@@ -1,8 +1,8 @@
 # reachy-detection
 
-Reachy Mini coursework prototype. Current milestones: head movement and webcam
-hand tracking. Object detection, target selection, and spoken naming are not yet
-implemented.
+Reachy Mini coursework prototype. Current milestones: head movement, webcam
+hand tracking, and object detection. Target selection and spoken naming are not
+yet implemented; the camera demo does not control the robot yet.
 
 ## Setup
 
@@ -35,7 +35,34 @@ An open palm, fist, or two visible hands should not produce an arrow.
   Security > Camera. Restart the terminal after changing permissions if needed.
 - Close other apps using the webcam if capture fails.
 
-### How the rule works
+## Hand tracking with object detection
+
+```bash
+python hand_tracking.py --camera 1 --objects
+```
+
+Use the same camera index that worked for your webcam/iPhone; `1` is an example,
+not a fixed iPhone device ID. The first run downloads EfficientDet-Lite0 (int8,
+version 1). No additional Python packages are required.
+
+The preview adds blue boxes, category names, and confidence scores, while keeping
+the hand landmarks and green pointing arrow. Place two separated objects, such as
+a cup and a bottle, in good lighting. Check that both get labelled before trying
+to point. Boxes identify detected objects; they do not yet indicate a selected
+target. The model supports the 80 COCO categories, not arbitrary object names.
+
+The default minimum confidence is 0.4. If objects are missed, improve lighting,
+move them closer, or try `--score-threshold 0.3` (which can increase false positives).
+At most 10 detections are shown. Both models process the same clean, mirrored frame
+before overlays are drawn, so boxes and pointing direction share pixel coordinates.
+Frames wider than 960 pixels are resized proportionally, including high-resolution
+iPhone input. Processing is synchronous to avoid stale boxes from a different frame.
+
+EfficientDet-Lite0 is the lightweight model recommended in the
+[MediaPipe Object Detector guide](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector).
+Model: [version 1, int8](https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite).
+
+### How the pointing rule works
 
 MediaPipe Hand Landmarker supplies image and 3D world landmarks. The index finger's
 two middle joints must each have an angle of at least 155 degrees; the middle,
@@ -69,6 +96,9 @@ Five geometry tests cover rotations, reflections, non-pointing poses, degenerate
 landmarks, and short projected directions. These tests and blank-frame model
 inference passed on the development Mac. Live webcam validation was blocked by
 macOS camera permission; the preview and real-hand accuracy still need checking.
+Object detection also passed a blank-frame check and detected both a cat and dog
+in Google's example image. The combined preview was exercised with both real
+models and a substituted camera frame; live iPhone detection remains unverified.
 
 ## Head movement
 
