@@ -75,7 +75,8 @@ class WorkerTests(unittest.TestCase):
 
     def test_gesture_confirmation_counts_inference_results_not_display_frames(self):
         import cv2
-        from hand_tracking import run, MODEL_PATH
+        from hand_tracking import MODEL_PATH
+        from main import run
         from test_hand_tracking import hand_pixels, hand_pose
         from vision_worker import FrameResult
 
@@ -107,13 +108,13 @@ class WorkerTests(unittest.TestCase):
         def draw(image, text, origin, *args):
             if origin == (12, 27): statuses.append(text)
             return original(image, text, origin, *args)
-        with patch('hand_tracking.LatestFrameWorker', Worker), \
-             patch('hand_tracking.cv2.VideoCapture', return_value=Camera()), \
-             patch('hand_tracking.cv2.namedWindow'), patch('hand_tracking.cv2.imshow'), \
-             patch('hand_tracking.cv2.destroyAllWindows'), \
-             patch('hand_tracking.cv2.putText', side_effect=draw), \
-             patch('hand_tracking.cv2.getWindowProperty', return_value=1), \
-             patch('hand_tracking.cv2.waitKey', side_effect=[-1, -1, -1, ord('q')]):
+        with patch('main.LatestFrameWorker', Worker), \
+             patch('main.cv2.VideoCapture', return_value=Camera()), \
+             patch('main.cv2.namedWindow'), patch('main.cv2.imshow'), \
+             patch('main.cv2.destroyAllWindows'), \
+             patch('main.cv2.putText', side_effect=draw), \
+             patch('main.cv2.getWindowProperty', return_value=1), \
+             patch('main.cv2.waitKey', side_effect=[-1, -1, -1, ord('q')]):
             # A real user's saved calibration must not influence synthetic tests.
             with tempfile.TemporaryDirectory() as temporary:
                 run(0, MODEL_PATH, False,

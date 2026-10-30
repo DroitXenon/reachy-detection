@@ -1,8 +1,8 @@
 # reachy-detection
 
 Reachy Mini coursework prototype. Current milestones: head movement, webcam
-hand tracking, and object detection. Target selection and spoken naming are not
-yet implemented; the camera demo does not control the robot yet.
+hand tracking, object detection, and deterministic target selection. Spoken naming
+and connecting camera selections to robot movement are still pending.
 
 ## Setup
 
@@ -21,10 +21,62 @@ environment, leaving this Conda environment's OpenCV installation intact. Runtim
 inference uses OpenCV; PyTorch is not a runtime dependency. Internet is required
 for that first model preparation. Model files are ignored by Git.
 
+## Program structure
+
+- `hand_tracking.py`: MediaPipe HandTracker, landmark coordinates, and hand drawing.
+- `gesture_recog.py`: pointing recognition, personal calibration, and confirmation
+  across fresh inference results. It takes landmark arrays and has no camera or GUI.
+- `object_detection.py`: object models, filtering, and box drawing.
+- `target_selection.py`: pointing-ray geometry and target confirmation.
+- `vision_worker.py`: background inference and dropping outdated frames.
+- `main.py`: combines the modules, owns camera capture, preview, controls, and CLI.
+
+With both modes enabled, `main.py` sends a clean frame to the hand and object models, converts
+hand results to landmark arrays, passes them to `PointingRecognizer`, then passes
+a confirmed pointing ray and the matching object boxes to target selection.
+
+The previous `python hand_tracking.py ...` command still forwards to `main.py`
+and uses the same mode flags. `gesture_recognition.py` is a compatibility import
+for the renamed `gesture_recog.py`.
+
+## Choose a mode
+
+Both hand gestures and object detection are enabled by default, including
+pointing-based object selection. Use a mode flag to run just one function:
+
+| Flags | Behaviour |
+| --- | --- |
+| No mode flags | Both modes, plus pointing-based object selection (default). |
+| `--hand` | Hand landmarks, pointing gestures, and personal calibration only. |
+| `--object` | Object boxes, labels, and scores only. |
+| `--hand --object` | Both modes explicitly; same as the default. |
+
+```bash
+python main.py
+python main.py --hand
+python main.py --object
+```
+
+`python main.py` uses the default camera (index 0). Optionally add `--camera 1`
+to choose another camera. Omitting both mode flags enables all current
+vision functions even when other options, such as `--camera`, are supplied.
+`--list-object-labels` works on its own without opening the camera.
+To prepare/check only the selected model files without opening the camera, add
+`--download-model-only`. With no mode flags it prepares/checks both models;
+with `--hand` or `--object` it handles only that model:
+
+```bash
+python main.py --download-model-only
+python main.py --hand --download-model-only
+```
+
+The hand model downloads automatically when needed. YOLO models must first be
+exported with `python prepare_yolo.py`; hand-only mode does not need that export.
+
 ## Webcam hand tracking
 
 ```bash
-python hand_tracking.py --camera 1
+python main.py --hand
 ```
 
 The first run downloads Google's Hand Landmarker model into `models/` (internet
@@ -41,20 +93,31 @@ A resting second hand is allowed; two pointing hands are ambiguous.
   with one hand visible until the 15-sample progress completes (usually a few seconds).
 - Press **R** to clear the saved calibration and return to default recognition.
 - The amber arrow is only a direction preview; green indicates confirmed pointing.
-- Press **D** for additional object-detection diagnostics.
-- Use `python hand_tracking.py --camera 1` if the default camera is incorrect.
+- **C** and **R** are available only when `--hand` is enabled.
+- Use `python main.py --camera 1 --hand` if the default camera is incorrect.
 - On macOS, allow your terminal camera access in System Settings > Privacy &
   Security > Camera. Restart the terminal after changing permissions if needed.
 - Close other apps using the webcam if capture fails.
 
-## Hand tracking with object detection
+## Object detection only
 
 ```bash
-python hand_tracking.py --camera 1 --objects
+python main.py --object
 ```
 
-Use the same camera index that worked for your webcam/iPhone; `1` is an example,
-not a fixed iPhone device ID. The first run downloads EfficientDet-Lite0 (int8,
+This mode loads only the object detector and shows boxes, labels, and scores.
+It does not load the hand model or your pointing calibration, draw hand landmarks
+or arrows, or select a pointing target. Press **D** for below-threshold diagnostics
+and **-** / **+** to adjust the object confidence threshold. These object controls
+are available whenever `--object` is enabled, including the combined mode.
+
+## Hand gestures with object detection and selection
+
+```bash
+python main.py
+```
+
+The first run downloads EfficientDet-Lite0 (int8,
 version 1) only when explicitly using the legacy `.tflite` model. The default is
 now YOLO26s at 640px input, prepared with `python prepare_yolo.py` during setup.
 No additional runtime Python packages are required.
@@ -62,8 +125,9 @@ No additional runtime Python packages are required.
 The preview adds blue boxes, category names, and confidence scores, while keeping
 the hand landmarks and green pointing arrow. Place two separated objects, such as
 a cup and a bottle, in good lighting. Check that both get labelled before trying
-to point. Boxes identify detected objects; they do not yet indicate a selected
-target. The model supports the 80 COCO categories, not arbitrary object names.
+to point. Unselected objects have blue boxes; a confirmed target gets a thicker
+green box and a SELECTED label. The model supports the 80 COCO categories, not
+arbitrary object names.
 The `person` category is excluded inside the detector, so people do not get boxes
 or count toward the displayed object total. Hand detection still runs normally.
 
@@ -72,12 +136,12 @@ percentage points or **+** to raise it while running. The threshold is shown abo
 the preview. Lower thresholds can recover weak detections but increase false
 positives. Scores below 0.10 are discarded. Press **D** to see up to three below-threshold candidates, explicitly
 labelled as unconfirmed. These are model guesses, not verified object identities.
-If detection is disabled, the preview says **Objects OFF** and reminds you to use
-`--objects`. If objects are missed, improve lighting and move them closer. To check
+In hand-only mode, the preview says **Objects OFF**. Add `--object` to the
+`--hand` command to enable object detection and target selection. If objects are missed, improve lighting and move them closer. To check
 whether your object type is supported by the installed model:
 
 ```bash
-python hand_tracking.py --list-object-labels
+python main.py --list-object-labels
 ```
 
 The model includes cup, bottle, book, cell phone, keyboard, and many other common
@@ -89,17 +153,53 @@ before overlays are drawn, so boxes and pointing direction share pixel coordinat
 Frames wider than 960 pixels are resized proportionally, including high-resolution
 iPhone input.
 
+### Select the object you point at
+
+Run `python main.py`. Place a cup and bottle apart so their
+boxes do not overlap. Point until the arrow is green, then hold it toward either
+object. The target line should show **Selected: cup** or **Selected: bottle**, and
+that object's box turns green. Relax your hand or point away to clear selection.
+An amber arrow is only a direction preview and never selects an object.
+
+The target method is deterministic and lives in `target_selection.py`:
+
+1. Start the forward ray at index fingertip 8, using the fitted finger direction.
+   Its hand landmarks and object boxes come from the same inference snapshot.
+2. Intersect the ray with the detected boxes. Ignore boxes behind the fingertip,
+   invalid detections, and people. A ray beginning inside a box has entry distance 0.
+3. Allow small pointing jitter by padding each box by 0.5% of the image diagonal.
+   Select the first box along the forward ray. If the next box starts before the
+   first ends, or within another 2% of the image diagonal, return **Unclear**.
+   This also rejects overlapping boxes with the same category; model confidence
+   does not resolve pointing ambiguity.
+4. Require the same object in two distinct inference results. Match its label and
+   box overlap (IoU >= 0.3), so detector result reordering does not switch targets.
+   Repeated display frames do not count. A different object must confirm again.
+5. Clear immediately on ambiguous/no-hit rays, rejected pointing, calibration,
+   expired snapshots, mirroring, camera-size changes, or confidence changes.
+
+The two target-confirmation results are in addition to pointing confirmation, so
+there is a short deliberate hold before an object turns green. The rule is 2D:
+collinear objects, occlusion, large enclosing boxes, and depth pointing can remain
+ambiguous. Separate objects and aim the visible ray through the desired box.
+
+Manual check: select each of two objects in turn, relax your hand, point between
+them, and try overlapping boxes. Verify that only one box is green, ambiguity
+selects nothing, and an amber ray never produces a selected target. Robot movement
+and spoken naming will be connected after this selection behaviour is checked.
+
 ### Preview performance
 
 Camera capture and drawing stay on the main thread. A single background worker
-runs landmark detection, gesture recognition, and object detection on one source frame. It keeps only the newest pending frame
+runs only the enabled models; in combined mode both use one source frame.
+Gesture recognition uses the hand landmarks on the main thread. The worker keeps only the newest pending frame
 instead of building a queue of old frames. The live preview reuses recent overlays;
 overlays older than 300ms are hidden. Mirroring or resolution changes invalidate
 old results. Gesture confirmation counts new inference results, not display frames.
 During movement the boxes can trail the live image slightly; overlay age is shown
-in the preview and is not a measure of recognition confidence. Any future target
-selection must use the matched hand/object snapshot, not assume cached boxes are
-perfectly aligned with the latest camera image.
+in the preview and is not a measure of recognition confidence. Selection uses
+matched hand/object snapshots; cached boxes can still trail the latest camera
+image while objects move.
 
 The preview shows its FPS, inference time, and overlay age. These are separate:
 a smooth 30 FPS preview does not imply 30 object detections per second. The camera
@@ -117,7 +217,7 @@ For less inference work, prepare the nano model and select it explicitly:
 
 ```bash
 python prepare_yolo.py --size n
-python hand_tracking.py --camera 1 --objects --object-model models/yolo26n.onnx
+python main.py --object-model models/yolo26n.onnx
 ```
 
 Model source and published model comparisons: [Ultralytics YOLO26](https://docs.ultralytics.com/models/yolo26/).
@@ -136,7 +236,7 @@ select `--object-model models/yolo11s.onnx`. The default remains YOLO26s.
 The previous detector remains available for comparisons:
 
 ```bash
-python hand_tracking.py --camera 1 --objects --object-model models/efficientdet_lite0.tflite
+python main.py --object-model models/efficientdet_lite0.tflite
 ```
 
 Legacy model source: [MediaPipe Object Detector](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector).
@@ -174,13 +274,12 @@ original camera coordinates. A projection under 10 pixels or 20% of palm length 
 hidden because pointing toward the camera has no reliable 2D direction. A valid
 single-hand direction is shown in **amber even when recognition is unconfirmed**;
 this makes tracking visible and helps you align your pose. Green requires two fresh
-recognition results from the same hand. Amber must never trigger future target
-selection. Two recognised pointing hands are ambiguous.
+recognition results from the same hand. Amber never triggers target selection. Two recognised pointing hands are ambiguous.
 
 The classifier runs as cheap NumPy calculations; the extra gesture model no longer
 runs or needs downloading. The existing background inference worker and explicit
-Hand Landmarker remain. Object selection still needs your own deterministic
-pointing-ray/bounding-box method, which is a separate pending milestone.
+Hand Landmarker remain. The deterministic pointing-ray/bounding-box method
+selects targets as described above.
 
 Personal calibration cannot establish an accuracy rate across poses or users.
 Check your pointing pose, a fist, an open palm, and a V sign after calibrating.
@@ -189,12 +288,15 @@ Source: [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutio
 ### Checks
 
 ```bash
-python -m unittest -v test_hand_tracking test_object_detection test_yolo26 test_vision_worker
+python -m unittest discover -v
 ```
 
 Tests cover pose features, calibration persistence, duplicate-frame rejection, confidence
 filtering, person exclusion, both ONNX output formats, coordinate conversion, frame dropping,
-orientation changes, stale results, and worker errors. Native models are also
+orientation changes, stale results, ray geometry, target ambiguity/confirmation,
+selection switching and clearing, model cleanup, shared inference timestamps,
+mode-specific model loading and controls, the separated gesture interface, and
+worker errors. Native models are also
 checked on public reference images. Live iPhone accuracy and frame rate need a
 user check; synthetic frames and a few example images are not an accuracy benchmark.
 
@@ -215,4 +317,4 @@ python demo_head.py
 ```
 
 `--no-media` disables the daemon's camera/audio/streaming for the movement test.
-Webcam capture in `hand_tracking.py` is separate; speech is still to be added.
+Webcam capture in `main.py` is separate; speech is still to be added.

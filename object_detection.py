@@ -167,11 +167,12 @@ def visible_objects(detections, threshold):
             if max(c.score for c in d.categories) >= threshold][:10]
 
 
-def draw_objects(frame, detections):
+def draw_objects(frame, detections, selected_index=None):
     """Draw boxes in the same pixel coordinate system used by hand tracking."""
     height, width = frame.shape[:2]
-    color = (255, 170, 40)
-    for detection in detections:
+    for index, detection in enumerate(detections):
+        selected = index == selected_index
+        color = (0, 255, 80) if selected else (255, 170, 40)
         if not detection.categories:
             continue
         box = detection.bounding_box
@@ -183,8 +184,8 @@ def draw_objects(frame, detections):
             continue
         category = max(detection.categories, key=lambda item: item.score)
         name = category.category_name or category.display_name or "object"
-        label = f"{name} {category.score:.0%}"
-        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+        label = f"{'SELECTED: ' if selected else ''}{name} {category.score:.0%}"
+        cv2.rectangle(frame, (left, top), (right, bottom), color, 4 if selected else 2)
         (text_width, text_height), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
         )

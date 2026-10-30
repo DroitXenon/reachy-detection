@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from gesture_recognition import PointingPose, choose_pointing_hand, pointing_direction, pose_features
+from gesture_recog import PointingPose, choose_pointing_hand, pointing_direction, pose_features
 
 
 def hand_pose(extended=(5,)):
