@@ -228,3 +228,5 @@ models/yolo11*.json
 models/yolo26*.json
 calibration/*.json
 calibration/*.tmp
+.DS_Store
+.DS_Store
