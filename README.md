@@ -31,15 +31,17 @@ The first run downloads Google's Hand Landmarker model into `models/` (internet
 required once). Frames are processed locally and are not recorded. This demo runs
 independently of Reachy and does not require the simulator.
 
-Extend your index finger and let the other fingers bend naturally; a tight fist
-is not required. Keep your hand in view and point across the image. The preview
-draws all 21 landmarks and shows a green arrow after two consecutive pointing
-frames from the same hand. A resting second hand is allowed; two pointing hands,
-an open palm, or a fist are rejected.
+Make an index-finger pointing pose with the other fingers folded naturally. Keep your hand in view and point across the image. The preview
+draws all 21 landmarks and an amber, unconfirmed direction arrow for one tracked
+hand. A green arrow and POINTING appear after two fresh results confirm the pose.
+A resting second hand is allowed; two pointing hands are ambiguous.
 
 - Press **Q** or **Esc** to quit, or **M** to toggle the mirrored preview.
-- Press **D** for index-joint angles and straightness details. The status explains
-  whether to straighten the index, relax another finger, or improve visibility.
+- Press **C** while pointing naturally to calibrate your own pose. Hold it steady
+  with one hand visible until the 15-sample progress completes (usually a few seconds).
+- Press **R** to clear the saved calibration and return to default recognition.
+- The amber arrow is only a direction preview; green indicates confirmed pointing.
+- Press **D** for additional object-detection diagnostics.
 - Use `python hand_tracking.py --camera 1` if the default camera is incorrect.
 - On macOS, allow your terminal camera access in System Settings > Privacy &
   Security > Camera. Restart the terminal after changing permissions if needed.
@@ -82,7 +84,7 @@ The model includes cup, bottle, book, cell phone, keyboard, and many other commo
 objects, but not every item (for example, pen is not a category). Threshold changes
 cannot add new categories.
 
-At most 10 detections are shown. Both models process the same clean, mirrored frame
+At most 10 detections are shown. All models use the same clean, mirrored source frame
 before overlays are drawn, so boxes and pointing direction share pixel coordinates.
 Frames wider than 960 pixels are resized proportionally, including high-resolution
 iPhone input.
@@ -90,7 +92,7 @@ iPhone input.
 ### Preview performance
 
 Camera capture and drawing stay on the main thread. A single background worker
-runs both models on the same clean frame. It keeps only the newest pending frame
+runs landmark detection, gesture recognition, and object detection on one source frame. It keeps only the newest pending frame
 instead of building a queue of old frames. The live preview reuses recent overlays;
 overlays older than 300ms are hidden. Mirroring or resolution changes invalidate
 old results. Gesture confirmation counts new inference results, not display frames.
@@ -103,11 +105,12 @@ The preview shows its FPS, inference time, and overlay age. These are separate:
 a smooth 30 FPS preview does not imply 30 object detections per second. The camera
 requests 960x540 at 30 FPS, though the device/Continuity Camera may choose a different
 format. On the development M1 Pro, a paced synthetic 30 FPS camera kept the preview
-near 30 FPS with about 95ms inference time. GUI calls were substituted in that
-test; it does not measure the live iPhone connection. The earlier sequential
-pipeline took about 113ms per blank frame before capture/display, limiting it to
-roughly 9 FPS. A few public example images verified inference and person exclusion;
-they do not establish detection accuracy on the user's objects.
+near 30 FPS with about 93ms inference time using the current calibration method.
+GUI calls were substituted in that test; it does not measure the live iPhone
+connection. The earlier sequential pipeline took about 113ms per blank frame
+before capture/display, limiting it to roughly 9 FPS. Public example images
+verified inference and person exclusion; they do not establish detection accuracy
+on the user's objects.
 
 For less inference work, prepare the nano model and select it explicitly:
 
@@ -130,40 +133,50 @@ python hand_tracking.py --camera 1 --objects --object-model models/efficientdet_
 
 Legacy model source: [MediaPipe Object Detector](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector).
 
-### How the pointing rule works
+### How pointing recognition works
 
-MediaPipe Hand Landmarker supplies image and 3D world landmarks. Hand detection,
-presence, and tracking confidence thresholds are 0.5. Gesture rules use world
-coordinates so they are independent of image rotation and scale:
+The extra trained gesture-classification network and hand-crop matching have been
+removed. MediaPipe Hand Landmarker is the only hand model. Recognition uses four
+finger-reach ratios and four fingertip-protrusion measurements from its world
+landmarks. These distance ratios are independent of image rotation, translation,
+scale, and left/right reflection; no joint-angle thresholds are used.
 
-- Index PIP/DIP joint angles must be at least 140/135 degrees. Its base-to-tip
-  distance must be at least 86% of the sum of its three bone lengths.
-- A finger is clearly extended when both angles are at least 155 degrees and its
-  base-to-tip distance is at least 92% of bone length. Reject an extended middle
-  finger (V sign), or both an extended ring and little finger.
-- Also reject a middle finger whose reach ratio is within 0.03 of the index's or
-  greater, AND whose smaller joint angle is within 15 degrees of the index's or
-  greater. This prevents a similarly curved open hand from looking like pointing.
-- Other fingers can be loosely bent. The thumb is ignored. Invalid landmarks
-  are rejected. These remain heuristic thresholds, not a trained gesture classifier.
+Default recognition requires the index to reach at least 75% of its finger-chain
+length, protrude beyond the PIP joint, and extend more than the middle finger and
+the median of the other fingers. This is an initial heuristic. If it misses your
+natural pose, calibrate it directly:
 
-The arrow uses the screen-space vector from index knuckle (landmark 5) to fingertip
-(8), and starts at the fingertip. Both tracking and drawing use the same mirrored
-frame. A projection shorter than 15 pixels or 30% of wrist-to-middle-knuckle length
-is rejected. This catches some foreshortened poses but cannot reliably interpret
-pointing in depth. Two consecutive positive frames from the same handedness and a
-nearby wrist confirm the gesture; any rejected frame clears the arrow immediately.
-Two pointing hands are ambiguous, but one pointing hand alongside a resting hand
-is accepted. Occlusion and unusual poses can still fail.
+1. Keep **one hand** visible and make your natural pointing gesture.
+2. Click the preview window and press **C**.
+3. Keep pointing until **Calibration saved** appears. It collects 15 distinct
+   inference results, not repeated display frames. A changed/missing hand,
+   mirroring, camera-size changes, and excessive sample variation cancel capture.
+4. Point normally. The saved profile compares the current distance measurements
+   with your captured pose. Press **R** to remove it and calibrate again if needed.
 
-Manual check: point left/right/up/down with either hand, then show a fist and an
-open palm, remove your hand, and try a resting second hand versus two pointing
-hands. Check the arrow's direction and
-that it disappears when pointing is unclear. Live gesture accuracy needs this
-check on your webcam and with other users.
+Calibration uses median features and bounded per-feature tolerances. Clear fists,
+open palms, and V signs are rejected before comparison; do not calibrate with any
+of these. Your profile is stored locally as `calibration/pointing.json`, ignored by
+Git. No photos or video are saved. An alternative profile can be selected with
+`--calibration path/to/profile.json`. The profile contains pose measurements, not
+an accuracy estimate or probability.
 
-Uses the [MediaPipe Hand Landmarker Tasks API](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python)
-and the [official model, version 1](https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task).
+The arrow direction fits a line through index landmarks 5, 6, 7, and 8 in the
+original camera coordinates. A projection under 10 pixels or 20% of palm length is
+hidden because pointing toward the camera has no reliable 2D direction. A valid
+single-hand direction is shown in **amber even when recognition is unconfirmed**;
+this makes tracking visible and helps you align your pose. Green requires two fresh
+recognition results from the same hand. Amber must never trigger future target
+selection. Two recognised pointing hands are ambiguous.
+
+The classifier runs as cheap NumPy calculations; the extra gesture model no longer
+runs or needs downloading. The existing background inference worker and explicit
+Hand Landmarker remain. Object selection still needs your own deterministic
+pointing-ray/bounding-box method, which is a separate pending milestone.
+
+Personal calibration cannot establish an accuracy rate across poses or users.
+Check your pointing pose, a fist, an open palm, and a V sign after calibrating.
+Source: [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python).
 
 ### Checks
 
@@ -171,7 +184,7 @@ and the [official model, version 1](https://storage.googleapis.com/mediapipe-mod
 python -m unittest -v test_hand_tracking test_object_detection test_vision_worker
 ```
 
-Tests cover gesture geometry, relaxed poses, second-hand selection, confidence
+Tests cover pose features, calibration persistence, duplicate-frame rejection, confidence
 filtering, person exclusion, ONNX coordinate conversion/NMS, frame dropping,
 orientation changes, stale results, and worker errors. Native models are also
 checked on public reference images. Live iPhone accuracy and frame rate need a

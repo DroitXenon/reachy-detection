@@ -225,3 +225,5 @@ models/*.tflite
 models/*.pt
 models/*.onnx
 models/yolo11*.json
+calibration/*.json
+calibration/*.tmp

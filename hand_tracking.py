@@ -1,9 +1,8 @@
-"""Webcam landmarks and a conservative, rule-based pointing gesture demo."""
+"""Webcam landmarks, personally calibrated pointing, and object detection."""
 
 import argparse
 from collections import deque
 from contextlib import ExitStack
-import math
 from pathlib import Path
 import shutil
 import tempfile
@@ -21,6 +20,9 @@ from object_detection import (
     ranked_objects, supported_labels, visible_objects,
 )
 from vision_worker import LatestFrameWorker
+from gesture_recognition import (
+    PROFILE_PATH, PointingPose, choose_pointing_hand, pointing_direction,
+)
 
 
 MODEL_PATH = Path(__file__).resolve().parent / "models" / "hand_landmarker.task"
@@ -56,86 +58,6 @@ def ensure_model(path, url=MODEL_URL):
             temporary.unlink(missing_ok=True)
 
 
-def joint_angle(a, b, c):
-    """Angle at joint b, in degrees. Degenerate coordinates are invalid."""
-    u, v = a - b, c - b
-    denominator = np.linalg.norm(u) * np.linalg.norm(v)
-    if denominator < 1e-10:
-        return float("nan")
-    cosine = np.clip(np.dot(u, v) / denominator, -1.0, 1.0)
-    return math.degrees(math.acos(cosine))
-
-
-def finger_metrics(points, base):
-    """Measure straightness by joint angles and tip distance / bone length."""
-    finger = points[base:base + 4]
-    bones = np.linalg.norm(np.diff(finger, axis=0), axis=1)
-    if not np.isfinite(finger).all() or np.any(bones < 1e-10):
-        return float("nan"), float("nan"), float("nan")
-    reach = np.linalg.norm(finger[-1] - finger[0]) / bones.sum()
-    return joint_angle(*finger[:3]), joint_angle(*finger[1:]), reach
-
-
-def pointing_feedback(world_points):
-    """Accept a relaxed index point, but reject a palm or a clear V sign."""
-    metrics = [finger_metrics(world_points, base) for base in (5, 9, 13, 17)]
-    if not np.isfinite(metrics).all():
-        return False, "Hand unclear: keep fingers visible", "Invalid landmarks"
-    pip, dip, reach = metrics[0]
-    debug = f"Index joints: {pip:.0f}/{dip:.0f} deg | reach: {reach:.2f}"
-    if pip < 140 or dip < 135 or reach < 0.86:
-        return False, "Straighten your index finger a little", debug
-    # Other fingers need not be tightly folded. Only clearly extended fingers
-    # count against pointing; the thumb is deliberately ignored.
-    extended = [a >= 155 and b >= 155 and r >= 0.92 for a, b, r in metrics[1:]]
-    middle_pip, middle_dip, middle_reach = metrics[1]
-    middle_similarly_straight = (
-        middle_reach > reach - 0.03
-        and min(middle_pip, middle_dip) > min(pip, dip) - 15
-    )
-    if extended[0] or middle_similarly_straight:
-        return False, "Relax your middle finger (avoid a V sign)", debug
-    if sum(extended) > 1:
-        return False, "Relax your ring and little fingers", debug
-    return True, "Pointing pose detected", debug
-
-
-def is_pointing(world_points):
-    return pointing_feedback(world_points)[0]
-
-
-def choose_pointing_hand(world_hands, pixel_hands):
-    """Allow a resting second hand, but never choose between two pointing hands."""
-    candidates = []
-    feedback = []
-    for index, (world, pixels) in enumerate(zip(world_hands, pixel_hands)):
-        pointing, reason, debug = pointing_feedback(world)
-        feedback.append((reason, debug))
-        if pointing:
-            candidates.append((index, pointing_direction(pixels), debug))
-    if len(candidates) > 1:
-        return None, None, "Unclear: two hands pointing", ""
-    if candidates:
-        index, direction, debug = candidates[0]
-        if direction is None:
-            return None, None, "Unclear: point across the image", debug
-        return index, direction, "Hold pointing gesture...", debug
-    if feedback:
-        reason = feedback[0][0] if len(feedback) == 1 else "No pointing pose: extend one index finger"
-        return None, None, reason, feedback[0][1]
-    return None, None, "No hand detected", ""
-
-
-def pointing_direction(pixels):
-    """Return a unit screen-space direction, or reject a short projection."""
-    direction = pixels[8] - pixels[5]
-    length = np.linalg.norm(direction)
-    palm_length = np.linalg.norm(pixels[9] - pixels[0])
-    if length < max(15, 0.3 * palm_length):
-        return None
-    return direction / length
-
-
 def draw_hand(frame, pixels):
     points = np.rint(pixels).astype(int)
     for start, end in CONNECTIONS:
@@ -144,8 +66,16 @@ def draw_hand(frame, pixels):
         cv2.circle(frame, tuple(point), 4, (0, 230, 255), -1)
 
 
+def put_panel_text(panel, text, origin, font, scale, color, thickness):
+    """Keep diagnostics readable within narrower webcam previews."""
+    text_width = cv2.getTextSize(text, font, scale, thickness)[0][0]
+    available = max(1, panel.shape[1] - origin[0] - 12)
+    fitted_scale = scale * min(1.0, available / max(1, text_width))
+    cv2.putText(panel, text, origin, font, fitted_scale, color, thickness)
+
+
 class VisionProcessor:
-    """Both models process the same clean frame, entirely on the worker thread."""
+    """All models process the same clean frame, entirely on the worker thread."""
 
     def __init__(self, model_path, object_model):
         self.model_path = model_path
@@ -192,7 +122,8 @@ def ensure_object_model(path):
         raise ValueError("Object model must be an exported .onnx or a .tflite file")
 
 
-def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.35):
+def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.35,
+        calibration_path=PROFILE_PATH):
     cv2.setNumThreads(4)  # Leave CPU capacity for capture, GUI, and hand inference.
     camera = cv2.VideoCapture(camera_index)
     try:
@@ -216,6 +147,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
         previous_shape = None
         last_processed = -1
         frame_times = deque(maxlen=60)
+        pose = PointingPose(calibration_path)
         with LatestFrameWorker(lambda: VisionProcessor(model_path, object_model)) as worker:
             while True:
                 success, frame = camera.read()
@@ -230,6 +162,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                     frame = cv2.flip(frame, 1)
                 height, width = frame.shape[:2]
                 if previous_shape != frame.shape:
+                    pose.cancel('Calibration cancelled: camera size changed; press C again')
                     generation += 1
                     previous_shape = frame.shape
                 sequence += 1
@@ -245,9 +178,15 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                     pixels = np.array([(p.x * width, p.y * height) for p in landmarks])
                     pixel_hands.append(pixels)
                     draw_hand(frame, pixels)
-                world_hands = [np.array([(p.x, p.y, p.z) for p in landmarks])
-                               for landmarks in result.hand_world_landmarks] if result is not None else []
-                index, direction, status, debug = choose_pointing_hand(world_hands, pixel_hands)
+                worlds = [np.array([(p.x, p.y, p.z) for p in landmarks])
+                          for landmarks in result.hand_world_landmarks] if result is not None else []
+                if pose.capturing and snapshot is None:
+                    pose.cancel('Calibration cancelled: tracking lost; press C again')
+                if new_result:
+                    labels = [categories[0].category_name for categories in result.handedness]
+                    wrists = [pixels[0] / [width, height] for pixels in pixel_hands]
+                    pose.observe(worlds, labels, wrists, snapshot.sequence)
+                index, direction, status, debug = choose_pointing_hand(worlds, pixel_hands, pose)
                 if index is not None and new_result:
                     pixels = pixel_hands[index]
                     hand = result.handedness[index][0].category_name
@@ -263,7 +202,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                     last_processed = snapshot.sequence
                 else:
                     status = "Waiting for fresh detection..."
-                stable = consecutive >= 2
+                stable = consecutive >= 2 and not pose.capturing
                 if stable:
                     pixels = pixel_hands[index]
                     status = "POINTING"
@@ -272,18 +211,31 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                     visible, start, end = cv2.clipLine((0, 0, width, height), origin, endpoint)
                     if visible:
                         cv2.arrowedLine(frame, start, end, (0, 255, 80), 3, tipLength=0.06)
+                elif len(pixel_hands) == 1:
+                    # Show that tracking works even when the pose is unconfirmed.
+                    # This amber preview is never a confirmed pointing result.
+                    pixels = pixel_hands[0]
+                    preview_direction = pointing_direction(pixels)
+                    if preview_direction is not None:
+                        origin = tuple(np.rint(pixels[8]).astype(int))
+                        endpoint = tuple(np.rint(pixels[8] + preview_direction * max(width, height)).astype(int))
+                        visible, start, end = cv2.clipLine((0, 0, width, height), origin, endpoint)
+                        if visible:
+                            cv2.arrowedLine(frame, start, end, (0, 190, 255), 2, tipLength=0.06)
+                if pose.capturing:
+                    status = pose.notice
                 # Put controls above the image so they never hide object labels.
-                panel = np.full((172 if show_debug else 120, width, 3), 25, dtype=np.uint8)
+                panel = np.full((198 if show_debug else 172, width, 3), 25, dtype=np.uint8)
                 color = (0, 255, 80) if stable else (220, 220, 220)
-                cv2.putText(panel, status, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                controls = "Q / Esc: quit | M: mirror | D: details"
+                put_panel_text(panel, status, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                controls = "C: teach pointing | R: reset | Q: quit | M: mirror | D: details"
                 if object_model is not None:
                     object_status = f"Objects: {len(detections)} | Minimum score: {score_threshold:.0%} | - / +: adjust"
                 else:
                     object_status = "Objects OFF: restart with --objects to detect items"
-                cv2.putText(panel, object_status, (12, 53),
+                put_panel_text(panel, object_status, (12, 53),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 200, 120), 1)
-                cv2.putText(panel, controls, (12, 79),
+                put_panel_text(panel, controls, (12, 79),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1)
                 frame_times.append(time.monotonic())
                 fps = ((len(frame_times) - 1) / max(1e-6, frame_times[-1] - frame_times[0]))
@@ -291,18 +243,23 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                 if snapshot is not None:
                     age = (time.monotonic() - snapshot.captured_at) * 1000
                     metrics += f" | Inference: {snapshot.inference_ms:.0f} ms | Overlay age: {age:.0f} ms"
-                cv2.putText(panel, metrics, (12, 105), cv2.FONT_HERSHEY_SIMPLEX,
+                put_panel_text(panel, metrics, (12, 105), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, (190, 190, 190), 1)
+                hint = 'Amber: unconfirmed direction | Green: confirmed pointing'
+                if pose.notice:
+                    hint += ' | ' + pose.notice
+                put_panel_text(panel, hint, (12, 131),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1)
+                put_panel_text(panel, debug, (12, 157), cv2.FONT_HERSHEY_SIMPLEX,
+                               0.5, (190, 190, 190), 1)
                 if show_debug:
-                    cv2.putText(panel, debug, (12, 131), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5, (190, 190, 190), 1)
                     low_scores = []
                     for detection in ranked_objects(raw_detections):
                         category = max(detection.categories, key=lambda item: item.score)
                         if category.score < score_threshold:
                             low_scores.append(f"{category.category_name} {category.score:.0%}")
                     detail = "Below threshold (unconfirmed): " + (", ".join(low_scores[:3]) or "none")
-                    cv2.putText(panel, detail, (12, 157), cv2.FONT_HERSHEY_SIMPLEX,
+                    put_panel_text(panel, detail, (12, 183), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.45, (190, 190, 190), 1)
                 cv2.imshow(WINDOW, np.vstack((panel, frame)))
                 key = cv2.waitKey(1) & 0xFF
@@ -311,10 +268,19 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                 if key == ord("m"):
                     mirror = not mirror
                     generation += 1
+                    pose.cancel('Calibration cancelled: mirror changed; press C again')
                     consecutive = 0
                     previous_hand = previous_wrist = None
                 if key == ord("d"):
                     show_debug = not show_debug
+                if key == ord('c'):
+                    pose.start()
+                    consecutive = 0
+                    previous_hand = previous_wrist = None
+                if key == ord('r'):
+                    pose.reset()
+                    consecutive = 0
+                    previous_hand = previous_wrist = None
                 if object_model is not None and key in (ord("-"), ord("_")):
                     score_threshold = max(0.1, round(score_threshold - 0.05, 2))
                 if object_model is not None and key in (ord("+"), ord("=")):
@@ -328,6 +294,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", type=int, default=0, help="Webcam index (default: 0)")
     parser.add_argument("--model", type=Path, default=MODEL_PATH)
+    parser.add_argument('--calibration', type=Path, default=PROFILE_PATH,
+                        help='Personal pointing profile (saved when C calibration finishes)')
     parser.add_argument("--no-mirror", action="store_true")
     parser.add_argument("--download-model-only", action="store_true")
     parser.add_argument("--objects", action="store_true", help="Also detect and label common objects")
@@ -350,7 +318,8 @@ def main():
             ensure_object_model(args.object_model)
         if not args.download_model_only:
             run(args.camera, args.model, not args.no_mirror,
-                args.object_model if args.objects else None, args.score_threshold)
+                args.object_model if args.objects else None, args.score_threshold,
+                args.calibration)
     except KeyboardInterrupt:
         pass
     except (OSError, RuntimeError, ValueError) as error:

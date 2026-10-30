@@ -74,14 +74,13 @@ class WorkerTests(unittest.TestCase):
     def test_gesture_confirmation_counts_inference_results_not_display_frames(self):
         import cv2
         from hand_tracking import run, MODEL_PATH
-        from test_hand_tracking import hand_pose
+        from test_hand_tracking import hand_pixels, hand_pose
         from vision_worker import FrameResult
 
-        world = hand_pose({5})
-        pixels = world[:, :2] * 20 + [300, 100]
+        pixels = hand_pixels()
         hand = SimpleNamespace(
             hand_landmarks=[[SimpleNamespace(x=x / 640, y=y / 480) for x, y in pixels]],
-            hand_world_landmarks=[[SimpleNamespace(x=x, y=y, z=z) for x, y, z in world]],
+            hand_world_landmarks=[[SimpleNamespace(x=x, y=y, z=z) for x, y, z in hand_pose()]],
             handedness=[[SimpleNamespace(category_name="Left")]],
         )
         class Worker:
