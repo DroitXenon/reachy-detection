@@ -10,9 +10,16 @@ yet implemented; the camera demo does not control the robot yet.
 conda create -n reachy-detection python=3.12 -y
 conda activate reachy-detection
 python -m pip install -r requirements.txt
+python prepare_yolo.py
 ```
 
 If the environment already exists, activate it and install the requirements.
+The YOLO model is already prepared on this development Mac. On a fresh checkout,
+`prepare_yolo.py` downloads official YOLO11s weights and exports a 640px ONNX model
+plus its label metadata into `models/`. It installs export tools in a temporary
+environment, leaving this Conda environment's OpenCV installation intact. Runtime
+inference uses OpenCV; PyTorch is not a runtime dependency. Internet is required
+for that first model preparation. Model files are ignored by Git.
 
 ## Webcam hand tracking
 
@@ -46,7 +53,9 @@ python hand_tracking.py --camera 1 --objects
 
 Use the same camera index that worked for your webcam/iPhone; `1` is an example,
 not a fixed iPhone device ID. The first run downloads EfficientDet-Lite0 (int8,
-version 1). No additional Python packages are required.
+version 1) only when explicitly using the legacy `.tflite` model. The default is
+now YOLO11s at 640px input, prepared with `python prepare_yolo.py` during setup.
+No additional runtime Python packages are required.
 
 The preview adds blue boxes, category names, and confidence scores, while keeping
 the hand landmarks and green pointing arrow. Place two separated objects, such as
@@ -56,10 +65,10 @@ target. The model supports the 80 COCO categories, not arbitrary object names.
 The `person` category is excluded inside the detector, so people do not get boxes
 or count toward the displayed object total. Hand detection still runs normally.
 
-The default minimum confidence is 0.25. Press **-** to lower the threshold by 5
+The default minimum confidence is 0.35. Press **-** to lower the threshold by 5
 percentage points or **+** to raise it while running. The threshold is shown above
 the preview. Lower thresholds can recover weak detections but increase false
-positives. Press **D** to see up to three below-threshold candidates, explicitly
+positives. Scores below 0.10 are discarded. Press **D** to see up to three below-threshold candidates, explicitly
 labelled as unconfirmed. These are model guesses, not verified object identities.
 If detection is disabled, the preview says **Objects OFF** and reminds you to use
 `--objects`. If objects are missed, improve lighting and move them closer. To check
@@ -76,11 +85,50 @@ cannot add new categories.
 At most 10 detections are shown. Both models process the same clean, mirrored frame
 before overlays are drawn, so boxes and pointing direction share pixel coordinates.
 Frames wider than 960 pixels are resized proportionally, including high-resolution
-iPhone input. Processing is synchronous to avoid stale boxes from a different frame.
+iPhone input.
 
-EfficientDet-Lite0 is the lightweight model recommended in the
-[MediaPipe Object Detector guide](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector).
-Model: [version 1, int8](https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite).
+### Preview performance
+
+Camera capture and drawing stay on the main thread. A single background worker
+runs both models on the same clean frame. It keeps only the newest pending frame
+instead of building a queue of old frames. The live preview reuses recent overlays;
+overlays older than 300ms are hidden. Mirroring or resolution changes invalidate
+old results. Gesture confirmation counts new inference results, not display frames.
+During movement the boxes can trail the live image slightly; overlay age is shown
+in the preview and is not a measure of recognition confidence. Any future target
+selection must use the matched hand/object snapshot, not assume cached boxes are
+perfectly aligned with the latest camera image.
+
+The preview shows its FPS, inference time, and overlay age. These are separate:
+a smooth 30 FPS preview does not imply 30 object detections per second. The camera
+requests 960x540 at 30 FPS, though the device/Continuity Camera may choose a different
+format. On the development M1 Pro, a paced synthetic 30 FPS camera kept the preview
+near 30 FPS with about 95ms inference time. GUI calls were substituted in that
+test; it does not measure the live iPhone connection. The earlier sequential
+pipeline took about 113ms per blank frame before capture/display, limiting it to
+roughly 9 FPS. A few public example images verified inference and person exclusion;
+they do not establish detection accuracy on the user's objects.
+
+For less inference work, prepare the nano model and select it explicitly:
+
+```bash
+python prepare_yolo.py --size n
+python hand_tracking.py --camera 1 --objects --object-model models/yolo11n.onnx
+```
+
+Model source and published model comparisons: [Ultralytics YOLO11](https://docs.ultralytics.com/models/yolo11/).
+The ONNX export uses opset 12, float32, fixed 640x640 input, letterboxing, and
+class-agnostic nonmaximum suppression at IoU 0.5. The smaller nano variant trades
+published detection accuracy for speed. Person detections are discarded before
+display and suppression. Neither model recognises categories outside COCO.
+
+The previous detector remains available for comparisons:
+
+```bash
+python hand_tracking.py --camera 1 --objects --object-model models/efficientdet_lite0.tflite
+```
+
+Legacy model source: [MediaPipe Object Detector](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector).
 
 ### How the pointing rule works
 
@@ -120,20 +168,14 @@ and the [official model, version 1](https://storage.googleapis.com/mediapipe-mod
 ### Checks
 
 ```bash
-python -m unittest -v test_hand_tracking test_object_detection
+python -m unittest -v test_hand_tracking test_object_detection test_vision_worker
 ```
 
-Twelve geometry tests cover rotations, reflections, relaxed pointing, non-pointing
-poses, invalid landmarks, second-hand selection, and short projections. These tests and blank-frame model
-inference passed on the development Mac. Live webcam validation was blocked by
-macOS camera permission; the preview and real-hand accuracy still need checking.
-Object detection also passed a blank-frame check and detected both a cat and dog
-in Google's example image. The combined preview was exercised with both real
-models and a substituted camera frame; live iPhone detection remains unverified.
-Person exclusion was verified with the native detector on Google's pose example:
-the baseline detected a person, while the filtered detector omitted it and kept
-other objects. The revised gesture thresholds need a live recheck with your hand;
-synthetic tests do not establish real-world accuracy.
+Tests cover gesture geometry, relaxed poses, second-hand selection, confidence
+filtering, person exclusion, ONNX coordinate conversion/NMS, frame dropping,
+orientation changes, stale results, and worker errors. Native models are also
+checked on public reference images. Live iPhone accuracy and frame rate need a
+user check; synthetic frames and a few example images are not an accuracy benchmark.
 
 ## Head movement
 
