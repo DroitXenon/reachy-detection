@@ -31,6 +31,18 @@ and generated metadata are excluded from Git. Network access is required for
 initial dependency installation and model preparation; inference runs locally.
 The application does not record camera frames.
 
+The default runtime requires three generated assets:
+
+| Path | Contents |
+| --- | --- |
+| `models/hand_landmarker.task` | MediaPipe Hand Landmarker model bundle. |
+| `models/yolo26s.onnx` | YOLO26s inference graph. |
+| `models/yolo26s.json` | Label map and graph metadata required by the ONNX decoder. |
+
+Downloaded `.pt` weights are export inputs and are not needed after ONNX and JSON
+generation. Alternative detector assets are prepared on demand using the export
+commands below.
+
 ## Execution
 
 ```bash
@@ -129,8 +141,10 @@ flowchart LR
 | [`simulator.py`](simulator.py) | Full MuJoCo launch with the virtual camera disabled by default. |
 | [`prepare_yolo.py`](prepare_yolo.py) | Isolated model export and metadata generation. |
 
-`gesture_recognition.py` re-exports the gesture interface for compatibility.
-Running `hand_tracking.py` forwards to the main application.
+Runtime modules remain at the repository root. `test_*.py` contains the automated
+suite and its shared fixtures; `models/` holds generated assets.
+[`70101_3_spec.pdf`](70101_3_spec.pdf) contains the coursework specification.
+The project license is in [`LICENSE`](LICENSE).
 
 ### Frame and result contracts
 
@@ -322,9 +336,3 @@ exclusion, ray ambiguity, target identity and confirmation, frame freshness,
 generation resets, capture and inference scheduling, display tracking, GUI
 resource ownership, simulator gating, action cancellation, and speech cleanup.
 Device, GUI, and SDK boundaries use test doubles in the automated suite.
-
-With the simulator running, the standalone head diagnostic is:
-
-```bash
-python demo_head.py
-```
