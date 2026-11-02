@@ -2,3 +2,5 @@ reachy-mini[mujoco]==1.8.0
 mediapipe==1.2.0
 opencv-contrib-python==5.0.0.93
 numpy==2.5.4
+glfw==2.11.0
+PyOpenGL==3.1.10

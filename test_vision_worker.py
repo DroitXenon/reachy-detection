@@ -2,15 +2,15 @@
 
 from contextlib import contextmanager
 from threading import Event
-from pathlib import Path
-import tempfile
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 
+from test_preview_support import PreviewWindowStub
 from vision_worker import LatestFrameWorker
+from camera_capture import CameraFrame
 
 
 def factory(function):
@@ -73,7 +73,7 @@ class WorkerTests(unittest.TestCase):
                 return False
             wait_until(failed)
 
-    def test_gesture_confirmation_counts_inference_results_not_display_frames(self):
+    def test_pointing_is_immediate_and_stale_results_clear_the_preview(self):
         import cv2
         from hand_tracking import MODEL_PATH
         from main import run
@@ -92,34 +92,38 @@ class WorkerTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *exc): pass
             def submit(self, *args): pass
-            def latest(self, generation):
+            def latest(self, generation, max_age=0.3):
                 sequence = [1, 1, 2, None][self.calls]
                 self.calls += 1
                 if sequence is None: return None
                 now = time.monotonic()
                 return FrameResult(sequence, generation, now, now, 10, (hand, []))
         class Camera:
-            def isOpened(self): return True
-            def set(self, *args): pass
-            def read(self): return True, np.zeros((480, 640, 3), np.uint8)
-            def release(self): pass
+            actual_fps = 60
+            sequence = 0
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def wait_first(self, *args, **kwargs):
+                return CameraFrame(np.zeros((480, 640, 3), np.uint8), 0, time.monotonic())
+            def latest(self):
+                self.sequence += 1
+                return CameraFrame(np.zeros((480, 640, 3), np.uint8), self.sequence,
+                                   time.monotonic())
         statuses = []
         original = cv2.putText
         def draw(image, text, origin, *args):
             if origin == (12, 27): statuses.append(text)
             return original(image, text, origin, *args)
         with patch('main.LatestFrameWorker', Worker), \
-             patch('main.cv2.VideoCapture', return_value=Camera()), \
-             patch('main.cv2.namedWindow'), patch('main.cv2.imshow'), \
+             patch('main.LatestCamera', Camera), \
+             patch('main.PreviewWindow', PreviewWindowStub), patch('main.cv2.imshow'), \
              patch('main.cv2.destroyAllWindows'), \
              patch('main.cv2.putText', side_effect=draw), \
              patch('main.cv2.getWindowProperty', return_value=1), \
              patch('main.cv2.waitKey', side_effect=[-1, -1, -1, ord('q')]):
-            # A real user's saved calibration must not influence synthetic tests.
-            with tempfile.TemporaryDirectory() as temporary:
-                run(0, MODEL_PATH, False,
-                    calibration_path=Path(temporary) / 'test-pointing.json')
-        self.assertEqual(statuses, ['Hold pointing gesture...', 'Hold pointing gesture...',
+            run(0, MODEL_PATH, False, pace=False)
+        self.assertEqual(statuses, ['POINTING', 'POINTING',
                                     'POINTING', 'Waiting for fresh detection...'])
 
 

@@ -58,11 +58,12 @@ class TrackedHands:
     labels: tuple
 
 
-def extract_hands(result, image_size):
+def extract_hands(result, image_size, *, include_world=True):
     """Convert a MediaPipe result into arrays without deciding any gesture.
 
     ``image_size`` is (width, height) of the exact frame used for inference.
     A missing snapshot produces empty hands so stale gestures can be cleared.
+    Set ``include_world=False`` for the 2D-only app to skip unused world arrays.
     """
     if result is None:
         return TrackedHands((), (), ())
@@ -70,8 +71,8 @@ def extract_hands(result, image_size):
     return TrackedHands(
         pixels=tuple(np.array([(p.x * width, p.y * height) for p in hand])
                      for hand in result.hand_landmarks),
-        worlds=tuple(np.array([(p.x, p.y, p.z) for p in hand])
-                     for hand in result.hand_world_landmarks),
+        worlds=(tuple(np.array([(p.x, p.y, p.z) for p in hand])
+                      for hand in result.hand_world_landmarks) if include_world else ()),
         labels=tuple(categories[0].category_name for categories in result.handedness),
     )
 

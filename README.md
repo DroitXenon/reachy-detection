@@ -23,22 +23,26 @@ for that first model preparation. Model files are ignored by Git.
 
 ## Program structure
 
+- `camera_capture.py`: background camera capture with one replaceable latest frame.
 - `hand_tracking.py`: MediaPipe HandTracker, landmark coordinates, and hand drawing.
-- `gesture_recog.py`: pointing recognition, personal calibration, and confirmation
-  across fresh inference results. It takes landmark arrays and has no camera or GUI.
+- `gesture_recog.py`: immediate 2D finger-extension recognition from image
+  landmarks. It has no camera, GUI, calibration, or 3D pose logic.
 - `object_detection.py`: object models, filtering, and box drawing.
 - `target_selection.py`: pointing-ray geometry and target confirmation.
 - `vision_worker.py`: background inference and dropping outdated frames.
+- `preview_tracking.py`: display-only optical flow, smoothing, and short gap handling.
+- `preview_window.py`: GPU texture display with nonblocking window/input events.
 - `simulator.py`: launches full MuJoCo with its viewer and head control, skipping
   the unused virtual eye-camera stream for this external-camera project.
 - `robot_control.py`: bounded head movement in the local full MuJoCo simulator.
 - `speech.py`: offline spoken labels through macOS `say` or Linux eSpeak.
 - `interaction.py`: responds to confirmed targets on a background action thread.
-- `main.py`: combines the modules, owns camera capture, preview, controls, and CLI.
+- `main.py`: combines the modules, owns preview pacing, controls, and CLI.
 
 With both modes enabled, `main.py` sends a clean frame to the hand and object models, converts
-hand results to landmark arrays, passes them to `PointingRecognizer`, then passes
-a confirmed pointing ray and the matching object boxes to target selection.
+hand results to pixel landmark arrays, passes them and the model-result sequence
+to `PointingRecognizer.update(pixel_hands, sequence)`, then passes a valid pointing
+ray and the matching object boxes to target selection.
 `SelectionResponder` sends the selected box to the robot controller, then speaks
 its label. Camera capture and drawing continue while those actions run.
 
@@ -55,7 +59,7 @@ Use a mode flag to run just one vision function:
 | Flags | Behaviour |
 | --- | --- |
 | No mode flags | Hand gestures, objects, target selection, robot movement, and speech (default). |
-| `--hand` | Hand landmarks, pointing gestures, and personal calibration only. |
+| `--hand` | Hand landmarks and 2D finger-extension pointing only. |
 | `--object` | Object boxes, labels, and scores only. |
 | `--hand --object` | Both modes explicitly; same as the default. |
 
@@ -68,6 +72,9 @@ python main.py --object
 `python main.py` uses the default camera (index 0). Optionally add `--camera 1`
 to choose another camera. Omitting both mode flags enables all current
 vision functions even when other options, such as `--camera`, are supplied.
+The default preview target is 60 FPS. Optionally select another target from 1 to
+120 with `--fps`, for example `python main.py --fps 30`. The camera is asked for
+the same rate; the device may deliver a lower rate.
 `--list-object-labels` works on its own without opening the camera.
 The single modes `--hand` and `--object` do not start robot or speech actions.
 In combined mode, use `--no-robot` to disable movement, `--mute` to disable
@@ -99,17 +106,20 @@ The first run downloads Google's Hand Landmarker model into `models/` (internet
 required once). Frames are processed locally and are not recorded. This demo runs
 independently of Reachy and does not require the simulator.
 
-Make an index-finger pointing pose with the other fingers folded naturally. Keep your hand in view and point across the image. The preview
-draws all 21 landmarks and an amber, unconfirmed direction arrow for one tracked
-hand. A green arrow and POINTING appear after two fresh results confirm the pose.
-A resting second hand is allowed; two pointing hands are ambiguous.
+Extend your index finger across the image; the other fingers can be in any
+position. An open palm or V sign also counts when the index finger is extended.
+Bend the index finger to stop pointing. The preview draws all 21 landmarks.
+POINTING and a green arrow appear on the first fresh model result that passes
+the 2D extension check; there is no extra gesture-confirmation wait. An amber
+arrow is only a direction preview. A second hand with a bent index is allowed;
+two qualifying index fingers are ambiguous.
 
 - Press **Q** or **Esc** to quit, or **M** to toggle the mirrored preview.
-- Press **C** while pointing naturally to calibrate your own pose. Hold it steady
-  with one hand visible until the 15-sample progress completes (usually a few seconds).
-- Press **R** to clear the saved calibration and return to default recognition.
-- The amber arrow is only a direction preview; green indicates confirmed pointing.
-- **C** and **R** are available only when `--hand` is enabled.
+- Press **R** to clear pointing and ignore the cached result until a new model
+  result arrives.
+- The amber arrow is only a direction preview; green indicates a valid fresh
+  pointing result.
+- **R** is available only when `--hand` is enabled.
 - Use `python main.py --camera 1 --hand` if the default camera is incorrect.
 - On macOS, allow your terminal camera access in System Settings > Privacy &
   Security > Camera. Restart the terminal after changing permissions if needed.
@@ -122,8 +132,8 @@ python main.py --object
 ```
 
 This mode loads only the object detector and shows boxes, labels, and scores.
-It does not load the hand model or your pointing calibration, draw hand landmarks
-or arrows, or select a pointing target. Press **D** for below-threshold diagnostics
+It does not load the hand model, draw hand landmarks or arrows, or select a
+pointing target. Press **D** for below-threshold diagnostics
 and **-** / **+** to adjust the object confidence threshold. These object controls
 are available whenever `--object` is enabled, including the combined mode.
 
@@ -174,14 +184,15 @@ iPhone input.
 Run `python main.py`. Place a cup and bottle apart so their
 boxes do not overlap. Point until the arrow is green, then hold it toward either
 object. The target line should show **Selected: cup** or **Selected: bottle**, and
-that object's box turns green. Relax your hand or point away to clear selection.
+that object's box turns green. Bend your index finger or point away to clear selection.
 An amber arrow is only a direction preview and never selects an object.
 With the full simulator running, the selected box also drives the head movement
 and its name is spoken. See the simulator setup below.
 
 The target method is deterministic and lives in `target_selection.py`:
 
-1. Start the forward ray at index fingertip 8, using the fitted finger direction.
+1. Start the forward ray at index fingertip 8, using the direct base-5-to-tip-8
+   direction.
    Its hand landmarks and object boxes come from the same inference snapshot.
 2. Intersect the ray with the detected boxes. Ignore boxes behind the fingertip,
    invalid detections, and people. A ray beginning inside a box has entry distance 0.
@@ -193,15 +204,16 @@ The target method is deterministic and lives in `target_selection.py`:
 4. Require the same object in two distinct inference results. Match its label and
    box overlap (IoU >= 0.3), so detector result reordering does not switch targets.
    Repeated display frames do not count. A different object must confirm again.
-5. Clear immediately on ambiguous/no-hit rays, rejected pointing, calibration,
+5. Clear immediately on ambiguous/no-hit rays, a bent index finger, a gesture reset,
    expired snapshots, mirroring, camera-size changes, or confidence changes.
 
-The two target-confirmation results are in addition to pointing confirmation, so
-there is a short deliberate hold before an object turns green. The rule is 2D:
+Pointing itself is immediate. Object selection still requires two distinct
+fresh model results for the same object, so there is a short hold before its box
+turns green. The rule is 2D:
 collinear objects, occlusion, large enclosing boxes, and depth pointing can remain
 ambiguous. Separate objects and aim the visible ray through the desired box.
 
-Manual check: select each of two objects in turn, relax your hand, point between
+Manual check: select each of two objects in turn, bend your index finger, point between
 them, and try overlapping boxes. Verify that only one box is green, ambiguity
 selects nothing, and an amber ray never produces a selected target. With the
 simulator running, also check that each confirmed object produces the expected
@@ -221,7 +233,7 @@ Holding a target steady does not keep repeating its name. A brief selection loss
 under 0.75 seconds suppresses repeated naming; reselecting after a longer pause
 can announce it again. A centre shift of at least 0.05 in normalized image
 coordinates can update the head direction, at most once every 0.6 seconds,
-without repeating the name. Stale, ambiguous, or relaxed pointing cancels queued
+without repeating the name. Stale, ambiguous, or bent-index pointing cancels queued
 actions. An already-started head movement finishes; its following speech is
 skipped if the selection is no longer current. Speech that has already begun may
 finish its current word; quitting stops the speech process.
@@ -239,28 +251,77 @@ command. No cloud service, API key, or additional Python dependency is used.
 If no local speech command is available, the voice status reports it and the
 vision/robot paths keep running.
 
-### Preview performance
+### Preview performance and smooth tracking
 
-Camera capture and drawing stay on the main thread. A single background worker
-runs only the enabled models; in combined mode both use one source frame.
-Gesture recognition uses the hand landmarks on the main thread. The worker keeps only the newest pending frame
-instead of building a queue of old frames. The live preview reuses recent overlays;
-overlays older than 300ms are hidden. Mirroring or resolution changes invalidate
-old results. Gesture confirmation counts new inference results, not display frames.
-During movement the boxes can trail the live image slightly; overlay age is shown
-in the preview and is not a measure of recognition confidence. Selection uses
-matched hand/object snapshots; cached boxes can still trail the latest camera
-image while objects move.
+`python main.py` targets a 60 FPS preview and requests 960x540 camera frames at
+60 FPS. `--fps 30` or `--fps 60` changes the target; accepted values are 1 to 120.
+The GPU preview uploads a reusable texture and polls window events without a
+timed wait. GLFW and PyOpenGL are pinned in `requirements.txt` and are already
+part of this development environment. Keyboard controls are unchanged.
+Actual rates depend on the camera, Continuity Camera connection, display, and
+available CPU/GPU capacity. A camera delivering 30 FPS still supplies 30 distinct
+images per second; a 60 FPS preview can redraw its latest image between captures.
+
+Camera reads run in their own thread and replace one latest frame, so a slow
+`camera.read()` cannot block preview drawing. A separate inference worker runs
+only the enabled models and retains at most one current and one newest pending
+frame. In combined mode, hand and object models process the same clean source
+frame. The default remains YOLO26s at 640px; smoothing does not switch models or
+change its detector confidence rules.
+
+The preview displays separate rates:
+
+- **Preview FPS / target:** how often the window is redrawn and its requested rate.
+- **Camera FPS:** measured arrivals of distinct camera frames.
+- **Models Hz:** measured completions of distinct model results.
+- **Inference and overlay age:** model processing time and the source age of the
+  visual landmarks/boxes, rather than recognition confidence.
+
+Drawing at 60 FPS does not mean running the neural models 60 times per second.
+Earlier native measurements around 100ms per combined result correspond to
+roughly 10 model updates per second. Display tracking bridges those updates with
+batched Lucas-Kanade optical flow and an exponential moving average for up to two
+hands and ten boxes. A short history of clean source frames aligns delayed model
+predictions with the current camera image before drawing them.
+
+A controlled native GUI test reached 60.0 FPS with the visible optimized MuJoCo
+simulator open, real Hand Landmarker/YOLO26s inference, and a synthetic 60 FPS
+camera moving public hand/object reference images. The models updated at about
+8.7 Hz while optical flow updated the display between predictions. This test
+used the actual GPU preview window; physical webcam/iPhone delivery still needs
+checking on your chosen device.
+
+A missed detection can retain its neutral/amber visual for up to 220ms, and every
+visual expires within 500ms of its last positive model source frame. This reduces
+flicker during brief gaps while still clearing lost hands/objects. Optical flow
+can fail during fast motion, occlusion, or camera movement; retained visuals are
+estimates and can trail the image slightly.
+
+Gesture recognition, target selection, and robot responses use only
+matched raw hand/object results captured within 300ms. Display smoothing and held
+visuals never count as fresh observations, confirm pointing, create a selected
+target, or trigger a robot action. Held visuals stay neutral/amber rather than
+showing a new green confirmation. Mirroring, resolution changes, gesture resets,
+and confidence changes reset the relevant tracking state.
+
+Manual check: move your finger and either object slowly, then quickly; check that
+landmarks and boxes follow without repeated disappearance during short inference
+gaps. Briefly hide a hand or object, then keep it out of view for more than half a
+second. The visual should clear, and stale or held visuals must not select a new
+target, preserve a green pointing confirmation, or queue a robot response. Use
+the separate Camera, Preview, and Models rates to distinguish capture limits from
+inference speed.
 
 Run the simulator with `mjpython simulator.py`. In the pinned Reachy Mini SDK
 1.8.0, the upstream MuJoCo backend also renders a virtual eye camera at
 1280x720 and 25 FPS and sends it over UDP, including when `--no-media` is used.
 This project uses an external webcam instead. That extra rendering can compete
-with inference: when source frames become more than 300ms old, their dots and
-boxes are hidden and pointing/target confirmation clears. The launcher disables
-only this unused virtual-camera loop while retaining the visible MuJoCo viewer,
-physics, head movement, and SDK connection. The capture-age freshness limits for
-detection and robot actions stay in effect.
+with inference and previously made the strict 300ms overlay cutoff produce
+repeated disappearing dots and boxes. The launcher disables only this unused
+virtual-camera loop while retaining the visible MuJoCo viewer, physics, head
+movement, and SDK connection. Short visual gaps are now handled by the display
+tracker; the 300ms source-age limit for gesture decisions and robot actions stays
+in effect.
 
 In a controlled reference-frame benchmark with the visible simulator and SDK
 movements active, median inference fell from about 175ms with the upstream
@@ -280,17 +341,13 @@ is involved rather than robot movement or speech calls. Compare the displayed
 inference time and overlay age. If this command runs smoothly, the interaction
 path needs further diagnosis. Return to `python main.py` for the full pipeline.
 
-The preview shows its FPS, inference time, and overlay age. These are separate:
-a smooth 30 FPS preview does not imply 30 object detections per second. The camera
-requests 960x540 at 30 FPS, though the device/Continuity Camera may choose a different
-format. On the development M1 Pro, a paced synthetic 30 FPS camera kept the preview
-near 30 FPS with about 94ms inference time using YOLO26s and the current calibration
-method. Object inference alone measured about 80ms on a public reference image.
-GUI calls were substituted in that test; it does not measure the live iPhone
-connection. The earlier sequential pipeline took about 113ms per blank frame
-before capture/display, limiting it to roughly 9 FPS. Public example images
-verified inference and person exclusion; they do not establish detection accuracy
-on the user's objects.
+Historical reference measurements on the development M1 Pro used a paced
+synthetic 30 FPS camera before the 60 FPS preview changes. They kept preview near
+30 FPS with about 94ms combined inference; object inference alone measured about
+80ms on one public reference image. GUI calls were substituted. These earlier
+measurements do not establish a current 60 FPS rate, live iPhone performance, or
+accuracy on the user's objects. Actual camera and preview rates must be checked
+in the current app.
 
 For less inference work, prepare the nano model and select it explicitly:
 
@@ -322,46 +379,40 @@ Legacy model source: [MediaPipe Object Detector](https://ai.google.dev/edge/medi
 
 ### How pointing recognition works
 
-The extra trained gesture-classification network and hand-crop matching have been
-removed. MediaPipe Hand Landmarker is the only hand model. Recognition uses four
-finger-reach ratios and four fingertip-protrusion measurements from its world
-landmarks. These distance ratios are independent of image rotation, translation,
-scale, and left/right reflection; no joint-angle thresholds are used.
+MediaPipe Hand Landmarker supplies the image coordinates. The pointing rule uses
+only the index landmarks 5 (base), 6, 7, and 8 (tip). It compares the direct
+base-to-tip distance with the total length along the three finger segments:
 
-Default recognition requires the index to reach at least 75% of its finger-chain
-length, protrude beyond the PIP joint, and extend more than the middle finger and
-the median of the other fingers. This is an initial heuristic. If it misses your
-natural pose, calibrate it directly:
+```text
+extension = distance(5, 8) / [distance(5, 6) + distance(6, 7) + distance(7, 8)]
+pointing  = extension >= 0.85
+```
 
-1. Keep **one hand** visible and make your natural pointing gesture.
-2. Click the preview window and press **C**.
-3. Keep pointing until **Calibration saved** appears. It collects 15 distinct
-   inference results, not repeated display frames. A changed/missing hand,
-   mirroring, camera-size changes, and excessive sample variation cancel capture.
-4. Point normally. The saved profile compares the current distance measurements
-   with your captured pose. Press **R** to remove it and calibrate again if needed.
+An extended index has a ratio close to 1; folding it reduces the ratio. This is
+one image-distance check, with no 3D joint angles, trained gesture classifier,
+pose template, or calibration. The other fingers are ignored, so an open palm or
+V sign can count when its index is extended. The debug line shows the extension
+ratio, which is a geometry measurement rather than a probability.
 
-Calibration uses median features and bounded per-feature tolerances. Clear fists,
-open palms, and V signs are rejected before comparison; do not calibrate with any
-of these. Your profile is stored locally as `calibration/pointing.json`, ignored by
-Git. No photos or video are saved. An alternative profile can be selected with
-`--calibration path/to/profile.json`. The profile contains pose measurements, not
-an accuracy estimate or probability.
+POINTING appears on the first valid fresh result. Duplicate preview frames can
+redraw that result but do not become additional model observations. Press **R**
+to clear it and wait for the next real model result. Two qualifying hands are
+ambiguous. Missing, invalid, or stale results clear pointing and stop new robot
+actions. Object selection independently keeps its two-result confirmation rule.
 
-The arrow direction fits a line through index landmarks 5, 6, 7, and 8 in the
-original camera coordinates. A projection under 10 pixels or 20% of palm length is
-hidden because pointing toward the camera has no reliable 2D direction. A valid
-single-hand direction is shown in **amber even when recognition is unconfirmed**;
-this makes tracking visible and helps you align your pose. Green requires two fresh
-recognition results from the same hand. Amber never triggers target selection. Two recognised pointing hands are ambiguous.
+The arrow uses the direct normalized vector from base 5 to tip 8; there is no
+line fitting or SVD. A projected index shorter than 5 pixels is rejected because
+it cannot provide a useful screen direction. This 2D method can miss a finger
+aimed toward the camera; point across the image for recognition and selection.
+Amber arrows and held display landmarks never trigger target selection.
 
-The classifier runs as cheap NumPy calculations; the extra gesture model no longer
-runs or needs downloading. The existing background inference worker and explicit
-Hand Landmarker remain. The deterministic pointing-ray/bounding-box method
-selects targets as described above.
+The old calibration API and `--calibration` option have been removed. An existing
+local `calibration/pointing.json` file is left untouched and is not read or used.
+No photos or video are saved.
 
-Personal calibration cannot establish an accuracy rate across poses or users.
-Check your pointing pose, a fist, an open palm, and a V sign after calibrating.
+The hand model, 60 FPS display tracking, deterministic ray/bounding-box object
+selection, and robot response continue as described above. Check an extended
+index in several orientations, then bend it and confirm pointing clears.
 Source: [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python).
 
 ### Checks
@@ -370,12 +421,15 @@ Source: [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutio
 python -m unittest discover -v
 ```
 
-Tests cover pose features, calibration persistence, duplicate-frame rejection, confidence
+Tests cover 2D finger-extension geometry, rotation and scale invariance, direct
+arrow direction, immediate pointing, cached-result reset, duplicate-frame handling,
+confidence
 filtering, person exclusion, both ONNX output formats, coordinate conversion, frame dropping,
 orientation changes, stale results, ray geometry, target ambiguity/confirmation,
 selection switching and clearing, model cleanup, shared inference timestamps,
-mode-specific model loading and controls, the separated gesture interface, and
-worker errors. Action tests cover gaze direction and simulator checks, repeated
+mode-specific model loading and controls, the separated gesture interface,
+background camera capture, distinct-frame counting, display smoothing and expiry,
+source-frame alignment, and worker errors. Action tests cover gaze direction and simulator checks, repeated
 selection suppression, cancellation, action-thread scheduling, and speech-process
 cleanup. Native models are also checked on public reference images. A controlled
 full MuJoCo headless check verified left/right head movement and the action
@@ -422,8 +476,8 @@ pipeline.
 Place a cup and bottle apart with both visible. Point at the cup until its box
 turns green: Reachy should turn toward its image position and say "cup". Then
 select the bottle and check its different head direction and name. Keep pointing
-at one object to check that speech does not repeat continuously. Relax your
-hand or point between overlapping candidates and check that no new response is
+at one object to check that speech does not repeat continuously. Bend your
+index finger or point between overlapping candidates and check that no new response is
 queued. Confirm the head direction after toggling mirroring with **M**. These
 live webcam, simulator, and speaker checks are still necessary on your setup.
 

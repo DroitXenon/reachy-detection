@@ -1,98 +1,95 @@
-"""Gesture confirmation without camera access or native model inference."""
+"""Immediate pointing from 2D finger extension, with source-identity resets."""
 
-from pathlib import Path
-import tempfile
 import unittest
 
 import numpy as np
 
 from gesture_recog import PointingRecognizer
-from test_hand_tracking import hand_pixels, hand_pose
+from test_hand_tracking import hand_pixels, hand_pose, index_pixels
 
 
 class PointingRecognizerTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.recognizer = PointingRecognizer(Path(temporary.name) / 'pointing.json')
+        self.recognizer = PointingRecognizer()
 
-    def update(self, sequence, label='Left', pixels=None, world=None):
+    def update(self, sequence, pixels=None):
         return self.recognizer.update(
-            [hand_pose() if world is None else world],
-            [hand_pixels() if pixels is None else pixels], [label], sequence, 640, 480,
+            [index_pixels() if pixels is None else pixels], sequence,
         )
 
-    def test_only_distinct_results_confirm_and_duplicates_retain_confirmation(self):
+    def test_first_fresh_extended_finger_is_pointing_immediately(self):
+        result = self.update(1)
+        self.assertTrue(result.stable)
+        self.assertEqual(result.index, 0)
+        self.assertEqual(result.status, 'POINTING')
+        np.testing.assert_allclose(result.direction, [0, 1])
+
+    def test_duplicate_source_can_redraw_without_an_additional_confirmation(self):
+        first = self.update(1)
+        duplicate = self.update(1)
+        self.assertTrue(first.stable)
+        self.assertTrue(duplicate.stable)
+        self.assertEqual(first.index, duplicate.index)
+        np.testing.assert_allclose(first.direction, duplicate.direction)
+
+    def test_reset_suppresses_cached_source_until_one_new_result(self):
+        self.assertTrue(self.update(1).stable)
+        self.recognizer.reset_confirmation()
         self.assertFalse(self.update(1).stable)
         self.assertFalse(self.update(1).stable)
         self.assertTrue(self.update(2).stable)
-        self.assertTrue(self.update(2).stable)
 
-    def test_changed_handedness_or_distant_wrist_needs_confirmation_again(self):
-        self.update(1)
-        self.assertTrue(self.update(2).stable)
-        self.assertFalse(self.update(3, label='Right').stable)
-        self.assertTrue(self.update(4, label='Right').stable)
-        moved = hand_pixels() + [200, 0]
-        self.assertFalse(self.update(5, label='Right', pixels=moved).stable)
-        self.assertTrue(self.update(6, label='Right', pixels=moved).stable)
-
-    def test_stale_result_clears_confirmation_and_requires_new_results(self):
-        self.update(1)
-        self.assertTrue(self.update(2).stable)
-        stale = self.recognizer.update([], [], [], None, 640, 480)
+    def test_stale_source_clears_and_cannot_be_reused(self):
+        self.assertTrue(self.update(1).stable)
+        stale = self.recognizer.update([], None)
         self.assertFalse(stale.stable)
         self.assertIsNone(stale.index)
-        # Redisplaying the old inference cannot count as a new confirmation.
-        self.assertFalse(self.update(2).stable)
-        self.assertFalse(self.update(3).stable)
-        self.assertTrue(self.update(4).stable)
-
-    def test_reset_does_not_recount_the_current_inference(self):
-        self.update(1)
+        self.assertFalse(self.update(1).stable)
         self.assertTrue(self.update(2).stable)
-        self.recognizer.reset_confirmation()
-        self.assertFalse(self.update(2).stable)
-        self.assertFalse(self.update(3).stable)
-        self.assertTrue(self.update(4).stable)
 
-    def test_rejected_or_ambiguous_pose_clears_confirmation(self):
-        self.update(1)
-        self.assertTrue(self.update(2).stable)
-        self.assertFalse(self.update(3, world=hand_pose(())).stable)
-        self.assertFalse(self.update(4).stable)
+    def test_bending_stops_pointing_and_extension_recovers_immediately(self):
+        self.assertTrue(self.update(1).stable)
+        for sequence, kind in enumerate(('pip_bent', 'dip_bent', 'folded'), 2):
+            with self.subTest(kind=kind):
+                result = self.update(sequence, index_pixels(kind))
+                self.assertFalse(result.stable)
+                self.assertIsNone(result.index)
         self.assertTrue(self.update(5).stable)
-        ambiguous = self.recognizer.update(
-            [hand_pose(), hand_pose()], [hand_pixels(), hand_pixels() + [200, 0]],
-            ['Left', 'Right'], 6, 640, 480,
-        )
+
+    def test_open_palm_v_sign_and_missing_other_fingers_are_accepted(self):
+        for sequence, extended in enumerate(((5,), (5, 9), (5, 9, 13, 17)), 1):
+            points = hand_pose(extended)[:, :2] * 30 + [200, 100]
+            self.assertTrue(self.update(sequence, points).stable)
+        only_index = np.full((21, 2), np.nan)
+        only_index[5:9] = hand_pixels()[5:9]
+        self.assertTrue(self.update(4, only_index).stable)
+
+    def test_screen_position_changes_do_not_add_a_hand_switch_delay(self):
+        self.assertTrue(self.update(1).stable)
+        self.assertTrue(self.update(2, index_pixels() + [200, 50]).stable)
+
+    def test_one_qualified_hand_is_selected_but_two_are_ambiguous(self):
+        result = self.recognizer.update([index_pixels('folded'), index_pixels()], 1)
+        self.assertTrue(result.stable)
+        self.assertEqual(result.index, 1)
+        ambiguous = self.recognizer.update([index_pixels(), index_pixels() + [200, 0]], 2)
         self.assertFalse(ambiguous.stable)
         self.assertIsNone(ambiguous.index)
-        self.assertIn('two hands', ambiguous.status)
+        self.assertIn('two hands', ambiguous.status.lower())
+        self.assertTrue(self.update(3).stable)
 
-    def test_calibration_counts_only_new_results_and_never_confirms_during_capture(self):
-        self.recognizer.pose.start()
-        self.recognizer.reset_confirmation()
-        for sequence in (1, 1, 2, 2):
-            result = self.update(sequence)
-            self.assertFalse(result.stable)
-            self.assertIn('CALIBRATING', result.status)
-        self.assertEqual(len(self.recognizer.pose.samples), 2)
-        np.testing.assert_allclose(self.recognizer.pose.capture_wrist,
-                                   hand_pixels()[0] / [640, 480])
-
-    def test_tracking_loss_cancels_calibration(self):
-        self.recognizer.pose.start()
-        self.update(1)
-        self.recognizer.update([], [], [], None, 640, 480)
-        self.assertFalse(self.recognizer.pose.capturing)
-        self.assertIn('tracking lost', self.recognizer.pose.notice)
-
-    def test_missing_hand_labels_or_invalid_pixels_clear_without_crashing(self):
-        for pixels, labels in (([hand_pixels()], []), ([np.zeros((3, 2))], ['Left'])):
-            result = self.recognizer.update([hand_pose()], pixels, labels, 1, 640, 480)
-            self.assertFalse(result.stable)
-            self.assertIsNone(result.index)
+    def test_no_hand_invalid_index_or_short_projection_cannot_point(self):
+        result = self.recognizer.update([], 1)
+        self.assertFalse(result.stable)
+        self.assertIsNone(result.index)
+        invalid = index_pixels(); invalid[8] = np.nan
+        short = index_pixels(); short[5:9] = [200, 200]
+        for sequence, pixels in enumerate((invalid, short, np.zeros((3, 2))), 2):
+            with self.subTest(sequence=sequence):
+                result = self.update(sequence, pixels)
+                self.assertFalse(result.stable)
+                self.assertIsNone(result.index)
+                self.assertIsNone(result.direction)
 
 
 if __name__ == '__main__':

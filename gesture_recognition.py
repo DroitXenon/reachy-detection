@@ -1,20 +1,15 @@
-"""Compatibility imports; gesture recognition now lives in gesture_recog."""
+"""Compatibility import for the 2D pointing implementation in gesture_recog."""
 
 from gesture_recog import (
-    FEATURE_FLOOR,
-    FINGERS,
-    PROFILE_PATH,
+    EXTENDED_RATIO,
+    MIN_FINGER_PIXELS,
     GestureResult,
-    PointingPose,
     PointingRecognizer,
-    choose_pointing_hand,
+    finger_extension,
     pointing_direction,
-    pose_features,
-    pose_guard,
 )
 
 __all__ = [
-    'FEATURE_FLOOR', 'FINGERS', 'PROFILE_PATH', 'GestureResult', 'PointingPose',
-    'PointingRecognizer', 'choose_pointing_hand', 'pointing_direction',
-    'pose_features', 'pose_guard',
+    'EXTENDED_RATIO', 'MIN_FINGER_PIXELS', 'GestureResult', 'PointingRecognizer',
+    'finger_extension', 'pointing_direction',
 ]

@@ -1,13 +1,10 @@
-"""Personal-pose, direction, persistence, and calibration safeguards."""
+"""Distance-only 2D finger extension and direct arrow geometry."""
 
-import json
-from pathlib import Path
-import tempfile
 import unittest
 
 import numpy as np
 
-from gesture_recog import PointingPose, choose_pointing_hand, pointing_direction, pose_features
+from gesture_recog import EXTENDED_RATIO, finger_extension, pointing_direction
 
 
 def hand_pose(extended=(5,)):
@@ -25,100 +22,80 @@ def hand_pixels():
     return hand_pose()[:, :2] * 30 + [200, 100]
 
 
-class PersonalPoseTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.path = Path(self.temporary.name) / 'pointing.json'
-        self.pose = PointingPose(self.path, sample_count=3)
 
-    def teach(self, world):
-        self.pose.start()
-        for sequence in range(3):
-            self.pose.observe([world], ['Left'], [[0.5, 0.5]], sequence)
+def index_pixels(kind='straight'):
+    """Independent screen-coordinate examples of extended and folded fingers."""
+    points = hand_pixels()
+    examples = {
+        'straight': [(0, 0), (0, 30), (0, 60), (0, 90)],
+        'slight': [(0, 0), (0, 30), (10, 58), (20, 86)],
+        'pip_bent': [(0, 0), (0, 30), (30, 30), (60, 30)],
+        'dip_bent': [(0, 0), (0, 30), (0, 60), (30, 60)],
+        'folded': [(0, 0), (0, 30), (30, 30), (30, 0)],
+    }
+    points[5:9] = np.asarray(examples[kind]) + [200, 100]
+    return points
 
-    def test_default_pointing_is_accepted(self):
-        self.assertTrue(self.pose.classify(hand_pose())[0])
 
-    def test_fist_palm_and_v_sign_are_rejected(self):
-        for extended in ((), (5, 9, 13, 17), (5, 9)):
-            self.assertFalse(self.pose.classify(hand_pose(extended))[0])
+class FingerExtensionTests(unittest.TestCase):
+    def test_straight_finger_has_full_extension(self):
+        self.assertAlmostEqual(finger_extension(index_pixels()), 1.0)
+        self.assertGreaterEqual(finger_extension(index_pixels()), EXTENDED_RATIO)
 
-    def test_features_and_decisions_are_rotation_scale_and_reflection_invariant(self):
-        world = hand_pose()
-        rotation = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
-        for transformed in (world @ rotation, world * 0.01 + 5, world * [-1, 1, 1]):
-            np.testing.assert_allclose(pose_features(world), pose_features(transformed), atol=1e-10)
-            self.assertTrue(self.pose.classify(transformed)[0])
+    def test_mostly_straight_finger_is_tolerated(self):
+        ratio = finger_extension(index_pixels('slight'))
+        self.assertGreaterEqual(ratio, EXTENDED_RATIO)
+        self.assertLess(ratio, 1.0)
 
-    def test_calibration_learns_a_pose_missed_by_default_and_persists(self):
-        world = hand_pose()
-        world[7:9] = [[0, 2, 1], [0, 2, 2]]  # A less extended personal pose.
-        self.assertFalse(self.pose.classify(world)[0])
-        self.teach(world)
-        self.assertFalse(self.pose.capturing)
-        self.assertTrue(self.path.is_file())
-        self.assertTrue(self.pose.classify(world)[0])
-        loaded = PointingPose(self.path)
-        self.assertTrue(loaded.classify(world)[0])
-        self.assertFalse(loaded.classify(hand_pose(()))[0])
-        self.assertFalse(loaded.classify(hand_pose((5, 9, 13, 17)))[0])
+    def test_fold_at_either_joint_reduces_extension(self):
+        for kind in ('pip_bent', 'dip_bent', 'folded'):
+            with self.subTest(kind=kind):
+                self.assertLess(finger_extension(index_pixels(kind)), EXTENDED_RATIO)
+        expected = np.sqrt(60 ** 2 + 30 ** 2) / 90
+        self.assertAlmostEqual(finger_extension(index_pixels('pip_bent')), expected)
+        self.assertAlmostEqual(finger_extension(index_pixels('dip_bent')), expected)
 
-    def test_preview_duplicates_do_not_complete_calibration(self):
-        self.pose.start()
-        for _ in range(10):
-            self.pose.observe([hand_pose()], ['Left'], [[0.5, 0.5]], 1)
-        self.assertEqual(len(self.pose.samples), 1)
-        self.assertFalse(self.path.exists())
+    def test_other_fingers_and_wrist_do_not_affect_extension(self):
+        reference = index_pixels()
+        only_index = np.full((21, 2), np.nan)
+        only_index[5:9] = reference[5:9]
+        self.assertAlmostEqual(finger_extension(only_index), 1.0)
+        np.testing.assert_allclose(pointing_direction(only_index), [0, 1])
+        for extended in ((5,), (5, 9), (5, 9, 13, 17), (5, 13)):
+            points = hand_pose(extended)[:, :2] * 30 + [200, 100]
+            self.assertAlmostEqual(finger_extension(points), 1.0)
 
-    def test_ambiguous_or_changed_hand_cancels_calibration(self):
-        for labels, wrists in ((['Right'], [[0.5, 0.5]]), (['Left'], [[0.9, 0.9]]), ([], [])):
-            self.pose.start()
-            self.pose.observe([hand_pose()], ['Left'], [[0.5, 0.5]], 1)
-            worlds = [hand_pose()] if labels else []
-            self.pose.observe(worlds, labels, wrists, 2)
-            self.assertFalse(self.pose.capturing)
-            self.assertFalse(self.path.exists())
+    def test_translation_rotation_reflection_and_visible_scale_are_invariant(self):
+        pixels = index_pixels('slight')
+        rotation = np.array([[0, -1], [1, 0]])
+        reference = finger_extension(pixels)
+        for transformed in (pixels + [230, -80], pixels @ rotation,
+                            pixels * [-1, 1], pixels * .5, pixels * 2):
+            with self.subTest(example=transformed[8].tolist()):
+                self.assertAlmostEqual(finger_extension(transformed), reference)
 
-    def test_invalid_and_open_palm_samples_cannot_calibrate(self):
-        self.pose.start()
-        for seq in range(4):
-            self.pose.observe([hand_pose((5, 9, 13, 17))], ['Left'], [[0.5, 0.5]], seq)
-        self.assertEqual(self.pose.samples, [])
-        self.assertFalse(self.path.exists())
-        self.assertIsNone(pose_features(np.zeros((21, 3))))
-        world = hand_pose(); world[8] = np.nan
-        self.assertIsNone(pose_features(world))
+    def test_malformed_nonfinite_collapsed_and_short_projection_are_invalid(self):
+        nonfinite = index_pixels(); nonfinite[7] = np.nan
+        collapsed = index_pixels(); collapsed[5:9] = [200, 200]
+        short = index_pixels(); short[5:9] = [(0, 0), (0, 1), (0, 2), (0, 3)]
+        for pixels in (None, np.zeros((4, 2)), np.zeros((21, 3)),
+                       nonfinite, collapsed, short):
+            with self.subTest(shape=np.shape(pixels)):
+                self.assertIsNone(finger_extension(pixels))
+                self.assertIsNone(pointing_direction(pixels))
 
-    def test_invalid_profile_falls_back_and_reset_removes_saved_profile(self):
-        self.path.write_text(json.dumps({'version': 1, 'centre': [0], 'tolerance': [0]}))
-        loaded = PointingPose(self.path)
-        self.assertIsNone(loaded.centre)
-        self.assertIn('invalid', loaded.notice)
-        self.teach(hand_pose())
-        self.pose.reset()
-        self.assertFalse(self.path.exists())
-        self.assertIsNone(self.pose.centre)
+    def test_arrow_uses_base_to_tip_even_for_a_bent_finger(self):
+        pixels = index_pixels('pip_bent')
+        expected = pixels[8] - pixels[5]
+        expected /= np.linalg.norm(expected)
+        np.testing.assert_allclose(pointing_direction(pixels), expected)
 
-    def test_resting_second_hand_and_two_pointing_hands(self):
-        pointing, resting = hand_pose(), hand_pose(())
-        for worlds, expected in (([pointing, resting], 0), ([resting, pointing], 1)):
-            pixels = [hand[:, :2] * 30 + [200, 100] for hand in worlds]
-            self.assertEqual(choose_pointing_hand(worlds, pixels, self.pose)[0], expected)
-        self.assertIsNone(choose_pointing_hand([pointing, pointing], [hand_pixels()] * 2, self.pose)[0])
-
-    def test_direction_rotates_and_reflects_without_classification(self):
-        pixels = hand_pixels()
-        np.testing.assert_allclose(pointing_direction(pixels), [0, 1], atol=1e-6)
-        np.testing.assert_allclose(pointing_direction(pixels[:, ::-1]), [1, 0], atol=1e-6)
+    def test_arrow_rotates_and_reflects_with_the_index(self):
+        pixels = index_pixels()
+        np.testing.assert_allclose(pointing_direction(pixels), [0, 1])
+        np.testing.assert_allclose(pointing_direction(pixels[:, ::-1]), [1, 0])
         pixels[:, 1] *= -1
-        np.testing.assert_allclose(pointing_direction(pixels), [0, -1], atol=1e-6)
-
-    def test_short_or_invalid_direction_is_hidden(self):
-        pixels = hand_pixels(); pixels[8] = pixels[5]
-        self.assertIsNone(pointing_direction(pixels))
-        pixels[8] = np.nan
-        self.assertIsNone(pointing_direction(pixels))
+        np.testing.assert_allclose(pointing_direction(pixels), [0, -1])
 
 
 if __name__ == '__main__':

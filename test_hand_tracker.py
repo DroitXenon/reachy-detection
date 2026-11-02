@@ -12,6 +12,16 @@ from main import VisionProcessor
 
 
 class HandTrackerTests(unittest.TestCase):
+    def test_2d_extraction_does_not_require_world_landmarks(self):
+        point = SimpleNamespace(x=.25, y=.75)
+        result = SimpleNamespace(
+            hand_landmarks=[[point] * 21],
+            handedness=[[SimpleNamespace(category_name='Left')]],
+        )
+        hands = extract_hands(result, (640, 480), include_world=False)
+        self.assertEqual(hands.worlds, ())
+        np.testing.assert_allclose(hands.pixels[0][8], [160, 360])
+
     def test_landmarks_keep_hand_order_and_image_coordinates(self):
         left = SimpleNamespace(x=0.25, y=0.75, z=-0.1)
         right = SimpleNamespace(x=0.8, y=0.2, z=0.3)
