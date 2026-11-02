@@ -35,6 +35,8 @@ class ModeCliTests(unittest.TestCase):
                 self.assertEqual(self.run.call_args.args[0], camera)
                 self.assertIsNotNone(self.run.call_args.args[3])
                 self.assertTrue(self.run.call_args.kwargs['hand_enabled'])
+                self.assertTrue(self.run.call_args.kwargs['robot_enabled'])
+                self.assertTrue(self.run.call_args.kwargs['speech_enabled'])
 
     def test_object_flag_selects_only_object_model(self):
         path = Path('custom-object.onnx')
@@ -44,6 +46,8 @@ class ModeCliTests(unittest.TestCase):
         self.assertEqual(self.run.call_args.args[0], 1)
         self.assertEqual(self.run.call_args.args[3], path)
         self.assertFalse(self.run.call_args.kwargs['hand_enabled'])
+        self.assertFalse(self.run.call_args.kwargs['robot_enabled'])
+        self.assertFalse(self.run.call_args.kwargs['speech_enabled'])
 
     def test_hand_flag_selects_only_hand_model(self):
         path = Path('custom-hand.task')
@@ -53,6 +57,17 @@ class ModeCliTests(unittest.TestCase):
         self.assertEqual(self.run.call_args.args[1], path)
         self.assertIsNone(self.run.call_args.args[3])
         self.assertTrue(self.run.call_args.kwargs['hand_enabled'])
+        self.assertFalse(self.run.call_args.kwargs['robot_enabled'])
+        self.assertFalse(self.run.call_args.kwargs['speech_enabled'])
+
+    def test_robot_and_voice_can_be_disabled_independently(self):
+        for flags, robot, voice in ((['--mute'], True, False),
+                                    (['--no-robot'], False, True),
+                                    (['--mute', '--no-robot'], False, False)):
+            with self.subTest(flags=flags):
+                main(flags)
+                self.assertEqual(self.run.call_args.kwargs['robot_enabled'], robot)
+                self.assertEqual(self.run.call_args.kwargs['speech_enabled'], voice)
 
     def test_both_flags_enable_both_models(self):
         main(['--hand', '--object'])

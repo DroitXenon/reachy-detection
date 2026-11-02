@@ -1,11 +1,12 @@
 """Exercise selection, switching, ambiguity, and clearing through the preview."""
 
 from pathlib import Path
+from contextlib import nullcontext
 import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
@@ -29,7 +30,7 @@ def hand_result(rotation=False, pointing=True):
     )
 
 
-def render_scenario():
+def render_scenario(**run_options):
     cup = detection(180, 300, 60, 60, 'cup')
     bottle = detection(330, 80, 80, 80, 'bottle')
     overlap = detection(190, 310, 60, 60, 'bottle')
@@ -72,11 +73,33 @@ def render_scenario():
          patch('main.cv2.getWindowProperty', return_value=1), \
          patch('main.cv2.waitKey', side_effect=[-1] * (len(steps) - 1) + [ord('q')]):
         run(0, MODEL_PATH, False, object_model=Path('models/yolo26s.onnx'),
-            calibration_path=Path(temporary) / 'profile.json')
+            calibration_path=Path(temporary) / 'profile.json', **run_options)
     return statuses, images
 
 
 class TargetPreviewTests(unittest.TestCase):
+    def test_preview_passes_confirmed_targets_and_snapshot_freshness_to_actions(self):
+        responder = Mock()
+        responder.status = 'Robot: ready | Voice: ready'
+        with patch('main.SelectionResponder', return_value=nullcontext(responder)) as factory:
+            statuses, _ = render_scenario(robot_enabled=True, speech_enabled=True)
+        factory.assert_called_once_with(True, True)
+        requests = responder.update.call_args_list
+        self.assertEqual(len(requests), len(statuses))
+        for status, request in zip(statuses, requests):
+            selection, detections, size, mirror, sequence, captured_at = request.args
+            self.assertEqual(selection.index is not None, status.startswith('Selected:'))
+            self.assertEqual(size, (640, 480))
+            self.assertFalse(mirror)
+            if selection.index is not None:
+                category = detections[selection.index].categories[0].category_name
+                self.assertEqual(status, f'Selected: {category}')
+                self.assertIsNotNone(sequence)
+                self.assertGreater(captured_at, 0)
+        self.assertIsNone(requests[10].args[4])  # Stale snapshots cannot authorize actions.
+        self.assertIsNone(requests[10].args[5])
+        responder.reset.assert_called()  # Camera-size initialization clears queued work.
+
     def test_switching_uses_confirmed_fresh_data_and_clears_immediately(self):
         statuses, images = render_scenario()
         self.assertNotIn('Selected:', statuses[0])  # Amber preview cannot select.

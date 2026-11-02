@@ -18,6 +18,7 @@ from object_detection import (
 )
 from target_selection import Selection, TargetTracker, select_target
 from vision_worker import LatestFrameWorker
+from interaction import SelectionResponder
 
 
 WINDOW = "Reachy - Vision"
@@ -76,7 +77,8 @@ def ensure_object_model(path):
 
 
 def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.35,
-        calibration_path=PROFILE_PATH, *, hand_enabled=True):
+        calibration_path=PROFILE_PATH, *, hand_enabled=True,
+        robot_enabled=False, speech_enabled=False):
     """Run the chosen models; target selection needs both hand and object modes."""
     if not hand_enabled and object_model is None:
         raise ValueError("Choose --hand, --object, or both")
@@ -102,9 +104,12 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
         recognizer = PointingRecognizer(calibration_path) if hand_enabled else None
         pose = recognizer.pose if recognizer is not None else None
         target_tracker = TargetTracker()
-        with LatestFrameWorker(
-            lambda: VisionProcessor(model_path if hand_enabled else None, object_model)
-        ) as worker:
+        with (
+            LatestFrameWorker(
+                lambda: VisionProcessor(model_path if hand_enabled else None, object_model)
+            ) as worker,
+            SelectionResponder(robot_enabled, speech_enabled) as responder,
+        ):
             while True:
                 success, frame = camera.read()
                 if not success:
@@ -123,6 +128,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                         recognizer.reset_confirmation()
                     generation += 1
                     target_tracker.reset()
+                    responder.reset()
                     previous_shape = frame.shape
                 sequence += 1
                 worker.submit(frame, sequence, captured_at, generation)
@@ -153,6 +159,11 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                               if object_model is None or not hand_enabled
                               else 'No target: confirm pointing first')
                     target = Selection(None, reason)
+                responder.update(
+                    target, detections, (width, height), mirror,
+                    snapshot.sequence if snapshot is not None else None,
+                    snapshot.captured_at if snapshot is not None else None,
+                )
                 draw_objects(frame, detections, selected_index=target.index)
                 if stable:
                     pixels = pixel_hands[index]
@@ -176,7 +187,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                 if pose is not None and pose.capturing:
                     status = pose.notice
                 # Put controls above the image so they never hide object labels.
-                panel = np.full((224 if show_debug else 198, width, 3), 25, dtype=np.uint8)
+                panel = np.full((250 if show_debug else 224, width, 3), 25, dtype=np.uint8)
                 color = (0, 255, 80) if stable else (220, 220, 220)
                 put_panel_text(panel, status, (12, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 target_color = ((0, 255, 80) if target.index is not None else
@@ -214,7 +225,9 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                     hint += ' | ' + pose.notice
                 put_panel_text(panel, hint, (12, 157),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1)
-                put_panel_text(panel, debug, (12, 183), cv2.FONT_HERSHEY_SIMPLEX,
+                put_panel_text(panel, responder.status, (12, 183), cv2.FONT_HERSHEY_SIMPLEX,
+                               0.45, (190, 190, 190), 1)
+                put_panel_text(panel, debug, (12, 209), cv2.FONT_HERSHEY_SIMPLEX,
                                0.5, (190, 190, 190), 1)
                 if show_debug:
                     low_scores = []
@@ -223,7 +236,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                         if category.score < score_threshold:
                             low_scores.append(f"{category.category_name} {category.score:.0%}")
                     detail = "Below threshold (unconfirmed): " + (", ".join(low_scores[:3]) or "none")
-                    put_panel_text(panel, detail, (12, 209), cv2.FONT_HERSHEY_SIMPLEX,
+                    put_panel_text(panel, detail, (12, 235), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.45, (190, 190, 190), 1)
                 cv2.imshow(WINDOW, np.vstack((panel, frame)))
                 key = cv2.waitKey(1) & 0xFF
@@ -236,22 +249,27 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                         pose.cancel('Calibration cancelled: mirror changed; press C again')
                         recognizer.reset_confirmation()
                     target_tracker.reset()
+                    responder.reset()
                 if object_model is not None and key == ord("d"):
                     show_debug = not show_debug
                 if pose is not None and key == ord('c'):
                     pose.start()
                     target_tracker.reset()
+                    responder.reset()
                     recognizer.reset_confirmation()
                 if pose is not None and key == ord('r'):
                     pose.reset()
                     target_tracker.reset()
+                    responder.reset()
                     recognizer.reset_confirmation()
                 if object_model is not None and key in (ord("-"), ord("_")):
                     score_threshold = max(0.1, round(score_threshold - 0.05, 2))
                     target_tracker.reset()
+                    responder.reset()
                 if object_model is not None and key in (ord("+"), ord("=")):
                     score_threshold = min(1.0, round(score_threshold + 0.05, 2))
                     target_tracker.reset()
+                    responder.reset()
     finally:
         camera.release()
         cv2.destroyAllWindows()
@@ -269,6 +287,8 @@ def main(argv=None):
     parser.add_argument('--calibration', type=Path, default=PROFILE_PATH,
                         help='Personal pointing profile (saved when C calibration finishes)')
     parser.add_argument("--no-mirror", action="store_true")
+    parser.add_argument("--no-robot", action="store_true", help="Disable simulated head movement")
+    parser.add_argument("--mute", action="store_true", help="Disable spoken object names")
     parser.add_argument("--download-model-only", action="store_true",
                         help="Prepare models for the selected modes without opening the camera")
     parser.add_argument("--object-model", type=Path, default=OBJECT_MODEL_PATH)
@@ -294,7 +314,9 @@ def main(argv=None):
         if not args.download_model_only:
             run(args.camera, args.model, not args.no_mirror,
                 args.object_model if args.object else None, args.score_threshold,
-                args.calibration, hand_enabled=args.hand)
+                args.calibration, hand_enabled=args.hand,
+                robot_enabled=args.hand and args.object and not args.no_robot,
+                speech_enabled=args.hand and args.object and not args.mute)
     except KeyboardInterrupt:
         pass
     except (OSError, RuntimeError, ValueError) as error:
