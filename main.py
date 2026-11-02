@@ -218,17 +218,6 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                     visible, start, end = cv2.clipLine((0, 0, width, height), origin, endpoint)
                     if visible:
                         cv2.arrowedLine(frame, start, end, (0, 255, 80), 3, tipLength=0.06)
-                elif not stable and len(preview.pixels) == 1:
-                    # Show that tracking works even when the pose is unconfirmed.
-                    # This amber preview is never a confirmed pointing result.
-                    pixels = preview.pixels[0]
-                    preview_direction = pointing_direction(pixels)
-                    if preview_direction is not None:
-                        origin = tuple(np.rint(pixels[8]).astype(int))
-                        endpoint = tuple(np.rint(pixels[8] + preview_direction * 2 * np.hypot(width, height)).astype(int))
-                        visible, start, end = cv2.clipLine((0, 0, width, height), origin, endpoint)
-                        if visible:
-                            cv2.arrowedLine(frame, start, end, (0, 190, 255), 2, tipLength=0.06)
                 # Put controls above the image so they never hide object labels.
                 panel = np.full((250 if show_debug else 224, width, 3), 25, dtype=np.uint8)
                 color = (0, 255, 80) if stable else (220, 220, 220)
@@ -262,7 +251,7 @@ def run(camera_index, model_path, mirror, object_model=None, score_threshold=0.3
                 put_panel_text(panel, metrics, (12, 131), cv2.FONT_HERSHEY_SIMPLEX,
                             0.5, (190, 190, 190), 1)
                 if hand_enabled:
-                    hint = 'Amber ray: preview | Green ray: pointing'
+                    hint = 'Green arrow: pointing only'
                     if object_model is not None:
                         hint += ' | Green box: selected'
                 else:

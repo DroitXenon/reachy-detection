@@ -110,15 +110,14 @@ Extend your index finger across the image; the other fingers can be in any
 position. An open palm or V sign also counts when the index finger is extended.
 Bend the index finger to stop pointing. The preview draws all 21 landmarks.
 POINTING and a green arrow appear on the first fresh model result that passes
-the 2D extension check; there is no extra gesture-confirmation wait. An amber
-arrow is only a direction preview. A second hand with a bent index is allowed;
+the 2D extension check; there is no extra gesture-confirmation wait. The arrow
+disappears when pointing is not detected. A second hand with a bent index is allowed;
 two qualifying index fingers are ambiguous.
 
 - Press **Q** or **Esc** to quit, or **M** to toggle the mirrored preview.
 - Press **R** to clear pointing and ignore the cached result until a new model
   result arrives.
-- The amber arrow is only a direction preview; green indicates a valid fresh
-  pointing result.
+- The arrow appears only for a valid fresh pointing result.
 - **R** is available only when `--hand` is enabled.
 - Use `python main.py --camera 1 --hand` if the default camera is incorrect.
 - On macOS, allow your terminal camera access in System Settings > Privacy &
@@ -185,7 +184,6 @@ Run `python main.py`. Place a cup and bottle apart so their
 boxes do not overlap. Point until the arrow is green, then hold it toward either
 object. The target line should show **Selected: cup** or **Selected: bottle**, and
 that object's box turns green. Bend your index finger or point away to clear selection.
-An amber arrow is only a direction preview and never selects an object.
 With the full simulator running, the selected box also drives the head movement
 and its name is spoken. See the simulator setup below.
 
@@ -215,7 +213,7 @@ ambiguous. Separate objects and aim the visible ray through the desired box.
 
 Manual check: select each of two objects in turn, bend your index finger, point between
 them, and try overlapping boxes. Verify that only one box is green, ambiguity
-selects nothing, and an amber ray never produces a selected target. With the
+selects nothing, and the arrow disappears when pointing stops. With the
 simulator running, also check that each confirmed object produces the expected
 head direction and spoken name.
 
@@ -404,7 +402,8 @@ The arrow uses the direct normalized vector from base 5 to tip 8; there is no
 line fitting or SVD. A projected index shorter than 5 pixels is rejected because
 it cannot provide a useful screen direction. This 2D method can miss a finger
 aimed toward the camera; point across the image for recognition and selection.
-Amber arrows and held display landmarks never trigger target selection.
+The arrow is hidden when pointing is not detected. Held display landmarks never
+trigger target selection.
 
 The old calibration API and `--calibration` option have been removed. An existing
 local `calibration/pointing.json` file is left untouched and is not read or used.
